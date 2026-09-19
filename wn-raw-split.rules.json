@@ -1,0 +1,38 @@
+{
+  "heading_max_len": 80,
+  "rules": [
+    {
+      "id": "part_en",
+      "label": "Part I / Part 2",
+      "pattern": "^\\s*Part\\s+[0-9IVXLCivxlc]+\\b.*",
+      "flags": "i",
+      "enabled": true,
+      "in_auto": true,
+      "in_generic": true,
+      "whole_line": true,
+      "weight": 1.0
+    },
+    {
+      "id": "day_n",
+      "label": "Day 12 / 12日目",
+      "pattern": "^\\s*(?:Day\\s*\\d+|第?\\s*[0-9０-９]+\\s*日目)\\b.*",
+      "flags": "i",
+      "enabled": true,
+      "in_auto": true,
+      "in_generic": false,
+      "whole_line": true,
+      "weight": 1.0
+    },
+    {
+      "id": "html_chapter",
+      "label": "HTML chapter heading",
+      "pattern": "<h[1-3][^>]*>\\s*.*(chapter|話|章|prologue).*</h[1-3]>",
+      "flags": "i",
+      "enabled": false,
+      "in_auto": false,
+      "in_generic": false,
+      "whole_line": false,
+      "weight": 1.0
+    }
+  ]
+}
