@@ -1,17 +1,17 @@
 # Changelog
 
-## 1.0.0 — 2026-09-19
+## 1.7.0 — 2026-09-22
 
-First production release.
+- Display name is **Novel Mill** (WN and LN). Repo folder name unchanged.
+- Mill pause default is 10 seconds.
+- Mill skips `_break`, `p-00x` stubs, and bodies under 80 characters.
+- Mill retries a timeout once; queue continues after Channel Error.
+- EPUB tab refuses Adobe ADEPT / AES-encrypted EPUBs.
+- Combine English shards → `english_full.txt`.
+- README rewritten in plain English with a terminology list.
 
-### WN Raw Split
-- Auto / Generic chapter detection for JP, EN, CN, KR dumps
-- 青空 大・中・小見出し, 話/章/Chapter/화, ep001, Scene001, named extras, volumes
-- User-defined splitters in `wn-raw-split.rules.json`
-- GUI: Scan, preview, write numbered files, strip 青空/HTML/ruby
+## 1.6.x
 
-### WN Scene Mill
-- Queue `in\*.txt` against LM Studio `/v1/chat/completions`
-- Fresh messages every file (no history)
-- Skip or overwrite existing English
-- Ping API, make lock folders, stop after current file
+- Tabbed dark host, EPUB + OCR + Split + Mill.
+- OCR vertical Japanese (`jpn_vert`), Combine to `raw_full.txt`.
+- Page-number and `⸻` strip before mill POST.
