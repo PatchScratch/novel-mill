@@ -1,151 +1,119 @@
-# wn-local-mill
+# Novel Mill
 
-Version **1.0.0**. Private production release.
+A small Windows (and Linux) desktop app that turns a Japanese **web novel** or **light novel** into English scene files using a model you run yourself in LM Studio.
 
-Two Windows GUIs that turn one web-novel / light-novel dump into English scene files via a local LM Studio server. No pip packages. Standard library plus Tk only.
+The GitHub folder is still called `wn-local-mill`. That is only the old project name. The window title is **Novel Mill**. Leave the `.py` file names alone so the copy on `D:\\Translation Software\\wn-local-mill\\` keeps working.
 
-| Tool | File | Job |
-| --- | --- | --- |
-| WN Raw Split | `wn-raw-split.py` | Split `raw_full.txt` into `in/*.txt` |
-| WN Scene Mill | `wn-scene-mill.py` | One POST per scene to LM Studio; write `out/*.en.txt` |
+There is no cloud account and no second AI server in this app. The mill talks only to LM Studio on `http://127.0.0.1:1234`.
 
-Launchers: `wn-raw-split.bat`, `wn-scene-mill.bat`.
+## What you need
 
-## Requirements
+- Python 3 on the PATH (`py -3` on Windows)
+- LM Studio, model loaded, Developer server on port 1234
+- For scanned pages: Tesseract-OCR with `jpn` and `jpn_vert` traineddata
+- For store EPUBs: Calibre. Convert EPUB to EPUB (or TXT) so Adobe DRM is gone before you Extract
 
-- Windows with Python 3.10+ (`py -3` on PATH). Tkinter is included with the official Windows installer.
-- [LM Studio](https://lmstudio.ai/) Developer server on `http://127.0.0.1:1234/v1`.
-- Proven local load (RTX 3070 8 GB): Gemma 4 12B-it Q4 Unsloth, context **4096**, Thinking **off**, **no mmproj**, **RAG uninstalled**. Clean decode is about 5–6 tok/s. RAG drops that to ~0.2 tok/s and overflows the window.
+## How to run
 
-## Install
+1. Close Novel Mill if it is open.
+2. Copy the files from this repo over `D:\\Translation Software\\wn-local-mill\\` (same names).
+3. Double-click `wn-local-mill.bat`.
+4. In LM Studio, load the model with **context 8192** (4096 is too small once lock files are included).
 
-```
-git clone https://github.com/PatchScratch/wn-local-mill.git
-cd wn-local-mill
-```
+Standalone bats still open one tab as its own window. Day to day, use the tabbed host.
 
-Or copy the six runtime files into a folder:
+## The five tabs
 
-```
-wn-raw-split.py
-wn-raw-split.bat
-wn-raw-split.rules.json
-wn-scene-mill.py
-wn-scene-mill.bat
-```
-
-Double-click a `.bat`, or:
-
-```
-py -3 wn-raw-split.py
-py -3 wn-scene-mill.py
-```
-
-## Series folder layout
-
-```
-D:\Translation Software\WN-Work\_series\<id>\
-  raw_full.txt          # one dump
-  in\                   # splitter output
-  out\                  # mill English
-  lock\
-    prompt.txt          # system lock (required style)
-    glossary.txt        # names
-    voices.txt          # who owns （） inner voice
-```
-
-Mill → **Make folders** creates `in`, `out`, `lock` and writes sample lock files if they are missing.
-
-Skip `000_front.txt` in the mill (title pages, TOC). Leave it in `in\` or delete it.
-
-## 1. Split the dump
-
-1. Open WN Raw Split.
-2. Point **Raw dump** at `raw_full.txt`. **Write to** defaults to a sibling `in\` folder.
-3. Mode **Auto (best heading family)** is the usual choice. **Generic** unions 話 / 章 / Chapter / 화 / ep / named extras / volumes plus enabled user rules.
-4. **Scan**. Check the part list and preview.
-5. **Write files**. Names look like `01_第1話_出会い.txt`.
-
-Built-in families: 青空 大・中・小見出し, 第N話 / N話 / 第N话, 第N章 / Chapter N / 제N장, ep001 / Episode, Scene001, Prologue / プロローグ / 閑話 / Afterword, Volume / 第N巻 / 第N部, page-break marks, rule lines (`───`, `***`).
-
-Use **Scene** only to cut a fat episode that overflows 4096 context. Do not run Scene on a whole novel.
-
-Encodings tried in order: UTF-8 BOM, UTF-8, cp932, Shift_JIS, GB18030, EUC-KR.
-
-## 2. Add your own splitters
-
-Edit `wn-raw-split.rules.json` (same folder as the script) or use **Add rule** in the GUI, then **Reload rules**.
-
-```json
-{
-  "heading_max_len": 80,
-  "rules": [
-    {
-      "id": "part_en",
-      "label": "Part I / Part 2",
-      "pattern": "^\\s*Part\\s+[0-9IVXLCivxlc]+\\b.*",
-      "flags": "i",
-      "enabled": true,
-      "in_auto": true,
-      "in_generic": true,
-      "whole_line": true,
-      "weight": 1.0
-    }
-  ]
-}
-```
-
-| Field | Meaning |
+| Tab | What it does |
 | --- | --- |
-| `id` | Mode key. No spaces. |
-| `pattern` | Python regex. Anchor with `^` for a heading line. |
-| `flags` | `i` / `m` / `s` |
-| `whole_line` | Only test lines shorter than `heading_max_len` that are not dialogue |
-| `in_auto` / `in_generic` | Include in those modes |
-| `weight` | Auto-mode score multiplier |
-| `enabled` | Off = ignored |
+| **EPUB** | Opens a DRM-free EPUB, writes chapter text into `in\\` and pictures into `images\\`. Refuses Adobe AES / ADEPT files. |
+| **OCR** | Runs Tesseract on a folder of page pictures. Writes `ocr\\*.ocr.txt`. **Combine** stitches those into `raw_full.txt`. |
+| **Split** | Cuts one big Japanese dump (`raw_full.txt`) into many small files in `in\\`. |
+| **Mill** | Sends each `in\\*.txt` to LM Studio, one HTTP request per file. Writes `out\\*.en.txt`. |
+| **Settings** | The shared **book folder**. Apply to tabs so every tab points at the same tree. |
 
-Shipped examples: Part I/II, Day N / N日目, disabled HTML `<h1>`–`<h3>` chapter tags.
+Usual path: EPUB (or OCR then Combine) then Split then Mill.
 
-## 3. Mill overnight
+## Book folder layout
 
-LM Studio first:
+One folder per WN series or per LN volume:
 
-1. Load Gemma 4 12B-it Q4. Context 4096.
-2. Uninstall RAG. Remove any mmproj / vision adapter from the model folder.
-3. Thinking off. No attachments. No chat history.
-4. Start the local server on port 1234.
+    my-book\\
+      raw_full.txt     whole Japanese text (Split input)
+      in\\              one scene or chapter per file (Mill input)
+      out\\             English files from the mill (*.en.txt)
+      images\\          page pictures
+      ocr\\             Tesseract output
+      lock\\            mill instructions (optional)
+        prompt.txt
+        glossary.txt
+        voices.txt
 
-Then WN Scene Mill:
+## Words we use
 
-1. **Series** = the novel folder. `in`, `out`, `lock` fill in.
-2. Model id must match LM Studio (`google/gemma-4-12b-it` or whatever `/v1/models` lists). **Ping API** to check.
-3. Temperature `0.1`. Timeout `600` seconds per file.
-4. **Start queue**. Existing `*.en.txt` are skipped unless **Overwrite** is on.
-5. **Stop after this file** finishes the current POST, then exits.
+**WN** — Web novel. Usually a long running serial (Syosetu and the like), plain text.
 
-Each file is a new request:
+**LN** — Light novel. A published volume, often an EPUB, sometimes vertical (tategaki) pages or pictures of pages.
 
-- `system` = concatenation of `lock/prompt.txt`, `glossary.txt`, `voices.txt`
-- `user` = `Translate to English only` wrapper around the Japanese scene
+**Book folder** — The one directory that holds `in`, `out`, `raw_full.txt`, and so on.
 
-No conversation history. Keep the lock short. If the API returns a context overflow, split that one scene smaller and re-queue.
+**Scene** — One file in `in\\`. The mill sends exactly one scene per request.
 
-## Lock file rules that matter
+**Shard** — One scene file, or one English `*.en.txt`. Combine glues shards back into one file.
 
-- English only. No synopsis, notes, or Japanese echo.
-- Keep `「」『』（）！？…〜ー`. Convert only `。` → `.` and `、` → `,`.
-- `「」` = spoken. `（）` = inner voice of the person who just acted or spoke, first person.
-- Onomatopoeia in romaji (`Bassaa`, `Kyaa`). No Slash / WHOOSH / BAM.
-- Drop 青空 `［＃…］` markup; do not explain it.
+**Dump / raw_full.txt** — The whole Japanese book in one UTF-8 text file.
 
-## Dual stream (how this tool is used)
+**Split** — Cutting the dump on headings, `[0017]` OCR page tags, or rule lines such as a long dash.
 
-- **Stream A** — simple chapters: Sugoi Toolkit Offline Japan, not this mill.
-- **Stream C** — voice / glossary novels: this mill + LM Studio.
+**_break.txt** — Files Split creates when the cut mode is rule (dash lines). They are not extra chapters. Delete them. The mill skips `*_break` names.
 
-Do not attach RAG, Nomic embeddings, or previous chapters. Consistency comes from the lock files, not from memory.
+**Stub / p-017.txt** — Tiny files from illustration pages. The mill skips bodies under 80 characters.
 
-## License
+**Mill** — The loop that calls LM Studio. No memory of the previous scene.
 
-MIT. See `LICENSE`.
+**Lock** — prompt.txt + glossary.txt + voices.txt. Names, speech marks, tone. They eat context tokens.
+
+**Context** — How many tokens the loaded model can see. Set it in LM Studio when you load the GGUF and in the Mill Context box. The box does not reload the model. 4096 + a lock file = HTTP 400.
+
+**Pause** — Seconds to wait after each scene so the GPU can catch up. Default is **10**.
+
+**LMS / LM Studio** — The local app that serves `/v1/chat/completions`. Novel Mill does not start it.
+
+**DRM / ADEPT** — Adobe encryption on a store EPUB. Convert in Calibre, then Extract the new EPUB.
+
+**Combine** — OCR: merge ocr text into raw_full.txt. Mill: merge out\\*.en.txt into english_full.txt.
+
+## Mill settings that matter
+
+- API base: `http://127.0.0.1:1234/v1`
+- Context: match the engine load (8192 on a 3070-class card)
+- Timeout: use 900 if 8-minute chapters die
+- Pause: default 10
+- Overwrite off means skip files that already have an .en.txt
+
+A typical LN volume of about 30 real chapters is about 3 to 5 hours on an RTX 3070 with Gemma 12B Q4, if you skip stubs and _break files.
+
+## Encoding
+
+Everything on disk must be UTF-8. Notepad Unicode is UTF-16 and will look like garbage after a split.
+
+## What this project is not
+
+- Not Novel Downloader
+- Not Translation Aggregator
+- Not an in-app reader, TTS, or cloud queue
+- Not a DRM remover
+
+## Files
+
+- wn-local-mill.py + .bat — tabbed host
+- wn-epub-extract.py — EPUB tab
+- wn-ocr.py — OCR tab
+- wn-raw-split.py — Split tab
+- wn-scene-mill.py — Mill tab
+- wn_series.py — shared folder names
+- wn-raw-split.rules.json — extra Split regexes
+
+## Licence
+
+See LICENSE.
