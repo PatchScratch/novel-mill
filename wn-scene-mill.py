@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-# WN Scene Mill — dumb file loop to LM Studio (OpenAI-compatible).
-# One scene per request. No chat history. No RAG.
-# Windows: py -3 wn-scene-mill.py
+"""
+Novel Mill — Mill tab.
 
+One Japanese scene file = one HTTP POST to LM Studio
+(/v1/chat/completions). No chat history. No RAG. No second server.
+
+Lock files (prompt.txt, glossary.txt, voices.txt) are concatenated into
+the system message. Missing lock → FALLBACK_SYSTEM.
+
+Pause (default 10 s) sits between POSTs so a 3070-class GPU can flush.
+"""
 from __future__ import annotations
 
 import json
+import os
 import queue
+import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -15,9 +25,9 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-__version__ = "1.0.0"
-APP_TITLE = "WN Scene Mill"
-DEFAULT_BASE = r"D:\Translation Software\WN-Work\_series\n7183mn"
+__version__ = "1.5.2"
+APP_TITLE = "Mill"
+DEFAULT_BASE = ""
 DEFAULT_API = "http://127.0.0.1:1234/v1"
 DEFAULT_MODEL = "google/gemma-4-12b-it"
 DEFAULT_KEY = "sk-xxx"
@@ -26,6 +36,18 @@ USER_PREFIX = (
     "No synopsis, no bullet points, no advice, no Japanese.\n\n<<<\n"
 )
 USER_SUFFIX = "\n>>>"
+SKIP_INPUT = {"raw_full.txt", "raw.txt", "raw_full.en.txt"}
+MIN_SCENE_CHARS = 80
+SKIP_NAME = re.compile(
+    r"(?:_break|_front|p-caution|(?:^|_)\d*_p-\d+|\bp-\d+)",
+    re.I,
+)
+FALLBACK_SYSTEM = (
+    "Japanese-to-English web novel translator. English only. "
+    "Keep 「」『』（）！？…〜ー. Convert only 。→. and 、→,. "
+    "「」 spoken. （） inner voice of the person who just acted, first person. "
+    "Onomatopoeia in romaji (Bassaa, Kyaa). No Slash/WHOOSH."
+)
 
 
 def read_text(path: Path) -> str:
@@ -38,39 +60,46 @@ def write_text(path: Path, text: str) -> None:
 
 
 def build_system(lock_dir: Path) -> str:
-    parts: list[str] = []
+    parts = []
     for name in ("prompt.txt", "glossary.txt", "voices.txt"):
         p = lock_dir / name
         if p.is_file():
             parts.append(f"## {name}\n{read_text(p).strip()}")
-    if not parts:
-        parts.append(
-            "Japanese-to-English web novel translator. English only.\n"
-            "Keep 「」『』（）！？…〜ー. Convert only 。 to . and 、 to ,.\n"
-            "「」 spoken. （） inner voice of the person who just acted, FIRST PERSON.\n"
-            "Onomatopoeia in romaji (Bassaa, Kyaa). No Slash/WHOOSH."
-        )
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) if parts else FALLBACK_SYSTEM
+
+
+def _nat_key(path: Path):
+    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", path.name.lower())]
 
 
 def scene_files(in_dir: Path) -> list[Path]:
-    files = [p for p in in_dir.iterdir() if p.is_file() and p.suffix.lower() == ".txt"]
-    return sorted(files, key=lambda p: p.name.lower())
+    files = []
+    for p in in_dir.iterdir():
+        if not p.is_file() or p.suffix.lower() != ".txt":
+            continue
+        if p.name.lower() in SKIP_INPUT:
+            continue
+        if SKIP_NAME.search(p.stem):
+            continue
+        files.append(p)
+    return sorted(files, key=_nat_key)
 
 
 def out_path_for(src: Path, out_dir: Path) -> Path:
     return out_dir / f"{src.stem}.en.txt"
 
 
-def post_chat(
-    api_base: str,
-    api_key: str,
-    model: str,
-    system: str,
-    user: str,
-    temperature: float,
-    timeout: int,
-) -> str:
+def queue_store_path() -> Path:
+    """Local only. Not written into the repo or the book folder."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home()) / "NovelMill"
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "novel_mill"
+    return base / "queues.json"
+
+
+def post_chat(api_base, api_key, model, system, user, temperature, timeout, max_tokens=None) -> str:
+    """One OpenAI-style chat completion. Caller owns retry and pause."""
     url = api_base.rstrip("/") + "/chat/completions"
     body = {
         "model": model,
@@ -80,124 +109,268 @@ def post_chat(
             {"role": "user", "content": user},
         ],
     }
-    raw = json.dumps(body).encode("utf-8")
+    if max_tokens and max_tokens > 0:
+        body["max_tokens"] = int(max_tokens)
     req = Request(
         url,
-        data=raw,
+        data=json.dumps(body).encode("utf-8"),
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
     )
     try:
         with urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {e.code}: {detail[:800]}") from e
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:800]}") from e
     except URLError as e:
-        raise RuntimeError(
-            f"Cannot reach LM Studio at {url}. Start Developer server on port 1234. ({e})"
-        ) from e
-
+        raise RuntimeError(f"Cannot reach LM Studio at {url}. ({e})") from e
     if "error" in payload:
         raise RuntimeError(str(payload["error"]))
-
     choices = payload.get("choices") or []
     if not choices:
         raise RuntimeError("Empty choices from API")
-    msg = choices[0].get("message") or {}
-    text = (msg.get("content") or "").strip()
-    if not text:
-        reason = choices[0].get("finish_reason")
-        raise RuntimeError(f"Empty content (finish_reason={reason})")
-    return text
+    return ((choices[0].get("message") or {}).get("content")) or ""
 
 
-class MillApp(tk.Tk):
-    def __init__(self) -> None:
-        super().__init__()
-        self.title(APP_TITLE)
-        self.geometry("920x640")
-        self.minsize(760, 520)
-
+class MillApp(ttk.Frame):
+    def __init__(self, master: tk.Misc | None = None) -> None:
+        own = master is None
+        if own:
+            master = tk.Tk()
+            master.title(APP_TITLE)
+            master.geometry("920x640")
+            master.minsize(760, 520)
+        super().__init__(master)
+        if own:
+            self.pack(fill="both", expand=True)
+        self._own_root = master if own else None
         self.stop_event = threading.Event()
-        self.worker: threading.Thread | None = None
-        self.log_q: queue.Queue[str] = queue.Queue()
-
-        self.series_var = tk.StringVar(value=DEFAULT_BASE)
-        self.in_var = tk.StringVar(value=str(Path(DEFAULT_BASE) / "in"))
-        self.out_var = tk.StringVar(value=str(Path(DEFAULT_BASE) / "out"))
-        self.lock_var = tk.StringVar(value=str(Path(DEFAULT_BASE) / "lock"))
+        self.worker = None
+        self.log_q = queue.Queue()
+        self.series_var = tk.StringVar(value="")
+        self.in_var = tk.StringVar(value="")
+        self.out_var = tk.StringVar(value="")
+        self.lock_var = tk.StringVar(value="")
         self.api_var = tk.StringVar(value=DEFAULT_API)
         self.model_var = tk.StringVar(value=DEFAULT_MODEL)
         self.key_var = tk.StringVar(value=DEFAULT_KEY)
         self.temp_var = tk.StringVar(value="0.1")
-        self.timeout_var = tk.StringVar(value="600")
+        self.timeout_var = tk.StringVar(value="1200")
+        self.pause_var = tk.StringVar(value="10")
+        self.ctx_var = tk.StringVar(value="8192")
         self.overwrite_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Idle. LM Studio server must be running.")
-
         self._build()
         self.after(120, self._drain_log)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._own_root is not None:
+            self._own_root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def apply_series(self, layout: dict) -> None:
+        self.series_var.set(str(layout["series"]))
+        self.in_var.set(str(layout["in_dir"]))
+        self.out_var.set(str(layout["out_dir"]))
+        if layout["lock"].is_dir():
+            self.lock_var.set(str(layout["lock"]))
+        self._refresh_scenes()
 
     def _build(self) -> None:
         pad = {"padx": 8, "pady": 4}
         frm = ttk.Frame(self)
         frm.pack(fill="both", expand=True)
-
         paths = ttk.LabelFrame(frm, text="Folders")
         paths.pack(fill="x", **pad)
         self._row_dir(paths, 0, "Series", self.series_var, self._pick_series)
-        self._row_dir(paths, 1, "Input scenes", self.in_var, lambda: self._pick_dir(self.in_var))
-        self._row_dir(paths, 2, "Output EN", self.out_var, lambda: self._pick_dir(self.out_var))
+        self._row_dir(paths, 1, "Scenes (in)", self.in_var, lambda: self._pick_dir(self.in_var))
+        self._row_dir(paths, 2, "English (out)", self.out_var, lambda: self._pick_dir(self.out_var))
         self._row_dir(paths, 3, "Lock files", self.lock_var, lambda: self._pick_dir(self.lock_var))
-
         api = ttk.LabelFrame(frm, text="LM Studio")
         api.pack(fill="x", **pad)
         ttk.Label(api, text="API base").grid(row=0, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(api, textvariable=self.api_var, width=36).grid(row=0, column=1, sticky="ew")
+        ttk.Entry(api, textvariable=self.api_var).grid(row=0, column=1, sticky="ew")
         ttk.Label(api, text="Model").grid(row=0, column=2, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.model_var, width=28).grid(row=0, column=3, sticky="ew")
+        ttk.Entry(api, textvariable=self.model_var).grid(row=0, column=3, sticky="ew")
         ttk.Label(api, text="Key").grid(row=1, column=0, sticky="w", padx=6, pady=3)
         ttk.Entry(api, textvariable=self.key_var, width=16).grid(row=1, column=1, sticky="w")
         ttk.Label(api, text="Temp").grid(row=1, column=2, sticky="w", padx=6)
         ttk.Entry(api, textvariable=self.temp_var, width=8).grid(row=1, column=3, sticky="w")
-        ttk.Label(api, text="Timeout s").grid(row=1, column=3, sticky="e", padx=(120, 6))
+        ttk.Label(api, text="Timeout s").grid(row=1, column=3, sticky="e", padx=(80, 4))
         ttk.Entry(api, textvariable=self.timeout_var, width=8).grid(row=1, column=3, sticky="e")
-        ttk.Checkbutton(
-            api, text="Overwrite existing .en.txt", variable=self.overwrite_var
-        ).grid(row=2, column=1, columnspan=2, sticky="w", padx=6, pady=3)
+        ttk.Label(api, text="Context").grid(row=2, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(api, textvariable=self.ctx_var, width=8).grid(row=2, column=1, sticky="w")
+        ttk.Label(api, text="Pause s").grid(row=2, column=2, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.pause_var, width=8).grid(row=2, column=3, sticky="w")
+        self.overwrite_lbl = ttk.Label(api, text="Existing .en.txt")
+        self.overwrite_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=3)
+        ow = ttk.Frame(api, style="Seg.TFrame")
+        ow.grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=3)
+        self._ow_keep = ttk.Button(ow, text="Keep existing", style="SegOn.TButton", command=lambda: self._set_overwrite(False))
+        self._ow_over = ttk.Button(ow, text="Overwrite", style="SegOff.TButton", command=lambda: self._set_overwrite(True))
+        self._ow_keep.pack(side="left", padx=1, pady=1)
+        self._ow_over.pack(side="left", padx=1, pady=1)
+        self._ui_lang = "en"
+        self._paint_overwrite()
         api.columnconfigure(1, weight=1)
         api.columnconfigure(3, weight=1)
-
         btns = ttk.Frame(frm)
         btns.pack(fill="x", **pad)
-        self.start_btn = ttk.Button(btns, text="Start queue", command=self._start)
+        self.start_btn = ttk.Button(btns, text="Start selected", command=self._start)
         self.start_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(btns, text="Stop after this file", command=self._stop, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
         ttk.Button(btns, text="Make folders", command=self._make_folders).pack(side="left", padx=4)
         ttk.Button(btns, text="Ping API", command=self._ping).pack(side="left", padx=4)
-
+        ttk.Button(btns, text="Combine out → one file", command=self._combine_out).pack(side="left", padx=4)
+        pick = ttk.LabelFrame(frm, text="Scenes to mill")
+        pick.pack(fill="both", expand=True, **pad)
+        self.pick_fr = pick
+        prow = ttk.Frame(pick)
+        prow.pack(fill="x", padx=4, pady=2)
+        self.btn_refresh = ttk.Button(prow, text="Refresh", command=self._refresh_scenes)
+        self.btn_refresh.pack(side="left", padx=2)
+        self.btn_missing = ttk.Button(prow, text="Missing only", command=self._pick_missing)
+        self.btn_missing.pack(side="left", padx=2)
+        self.btn_all = ttk.Button(prow, text="All", command=self._pick_all)
+        self.btn_all.pack(side="left", padx=2)
+        self.btn_none = ttk.Button(prow, text="None", command=self._pick_none)
+        self.btn_none.pack(side="left", padx=2)
+        self.pick_count = tk.StringVar(value="0 selected")
+        ttk.Label(prow, textvariable=self.pick_count).pack(side="left", padx=8)
+        self.scene_list = tk.Listbox(pick, height=10, activestyle="none", selectmode="browse")
+        self.scene_list.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+        self.scene_list.bind("<Button-1>", self._toggle_scene)
+        sc = ttk.Scrollbar(pick, command=self.scene_list.yview)
+        self.scene_list.configure(yscrollcommand=sc.set)
+        sc.pack(side="right", fill="y", pady=4)
+        self._scenes: list[Path] = []
+        self._picked: set[str] = set()
         self.progress = ttk.Progressbar(frm, mode="determinate")
         self.progress.pack(fill="x", padx=8, pady=2)
         ttk.Label(frm, textvariable=self.status_var).pack(anchor="w", padx=10)
-
         logf = ttk.LabelFrame(frm, text="Log")
         logf.pack(fill="both", expand=True, **pad)
-        self.log = tk.Text(logf, height=16, wrap="word", state="disabled")
+        self.log = tk.Text(logf, height=8, wrap="word", state="disabled")
         scroll = ttk.Scrollbar(logf, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        hint = (
-            "One scene file = one API call. No history. RAG must be uninstalled. "
-            "Context 4096: keep lock short and scenes split."
-        )
-        ttk.Label(frm, text=hint, foreground="#444").pack(anchor="w", padx=10, pady=(0, 8))
+    def _set_overwrite(self, on: bool) -> None:
+        self.overwrite_var.set(on)
+        self._paint_overwrite()
+
+    def _paint_overwrite(self) -> None:
+        on = bool(self.overwrite_var.get())
+        self._ow_keep.configure(style="SegOff.TButton" if on else "SegOn.TButton")
+        self._ow_over.configure(style="SegOn.TButton" if on else "SegOff.TButton")
+
+    def set_ui_lang(self, lang: str) -> None:
+        self._ui_lang = "en" if lang == "en" else "ja"
+        if self._ui_lang == "ja":
+            self.overwrite_lbl.configure(text="既存の .en.txt")
+            self._ow_keep.configure(text="既存を残す")
+            self._ow_over.configure(text="上書きする")
+        else:
+            self.overwrite_lbl.configure(text="Existing .en.txt")
+            self._ow_keep.configure(text="Keep existing")
+            self._ow_over.configure(text="Overwrite")
+        ja = self._ui_lang == "ja"
+        self.pick_fr.configure(text="ミルするシーン" if ja else "Scenes to mill")
+        self.btn_refresh.configure(text="再読込" if ja else "Refresh")
+        self.btn_missing.configure(text="未完了のみ" if ja else "Missing only")
+        self.btn_all.configure(text="全部" if ja else "All")
+        self.btn_none.configure(text="解除" if ja else "None")
+        self.start_btn.configure(text="選択を開始" if ja else "Start selected")
+
+    def _load_saved_pick(self, in_dir: Path) -> set[str] | None:
+        try:
+            raw = json.loads(queue_store_path().read_text(encoding="utf-8"))
+            names = raw.get(str(in_dir))
+            if isinstance(names, list):
+                return {str(n) for n in names}
+        except Exception:
+            return None
+        return None
+
+    def _save_pick(self) -> None:
+        in_dir = self.in_var.get().strip()
+        if not in_dir:
+            return
+        path = queue_store_path()
+        data: dict = {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        data[in_dir] = sorted(self._picked)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _refresh_scenes(self, keep: bool = True) -> None:
+        in_dir = Path(self.in_var.get().strip()) if self.in_var.get().strip() else None
+        self.scene_list.delete(0, "end")
+        self._scenes = scene_files(in_dir) if in_dir and in_dir.is_dir() else []
+        saved = self._load_saved_pick(in_dir) if in_dir else None
+        if keep and saved is not None:
+            self._picked = {p.name for p in self._scenes if p.name in saved}
+        elif not keep:
+            pass
+        else:
+            out_dir = Path(self.out_var.get().strip()) if self.out_var.get().strip() else None
+            self._picked = {
+                p.name for p in self._scenes
+                if out_dir is None or not out_path_for(p, out_dir).is_file()
+            }
+        self._paint_scenes()
+
+    def _paint_scenes(self) -> None:
+        self.scene_list.delete(0, "end")
+        out_dir = Path(self.out_var.get().strip()) if self.out_var.get().strip() else None
+        done_word = "完了" if getattr(self, "_ui_lang", "en") == "ja" else "done"
+        pend_word = "未完了" if getattr(self, "_ui_lang", "en") == "ja" else "pending"
+        for p in self._scenes:
+            mark = "x" if p.name in self._picked else " "
+            state = done_word if out_dir and out_path_for(p, out_dir).is_file() else pend_word
+            self.scene_list.insert("end", f"[{mark}]  {p.name}    {state}")
+        n = len(self._picked)
+        self.pick_count.set(f"{n} selected" if getattr(self, "_ui_lang", "en") != "ja" else f"{n} 件選択")
+
+    def _toggle_scene(self, event) -> str:
+        idx = self.scene_list.nearest(event.y)
+        if idx < 0 or idx >= len(self._scenes):
+            return "break"
+        name = self._scenes[idx].name
+        if name in self._picked:
+            self._picked.discard(name)
+        else:
+            self._picked.add(name)
+        self._save_pick()
+        self._paint_scenes()
+        self.scene_list.see(idx)
+        return "break"
+
+    def _pick_missing(self) -> None:
+        out_dir = Path(self.out_var.get().strip()) if self.out_var.get().strip() else None
+        self._picked = {
+            p.name for p in self._scenes
+            if out_dir is None or not out_path_for(p, out_dir).is_file()
+        }
+        self._save_pick()
+        self._paint_scenes()
+
+    def _pick_all(self) -> None:
+        self._picked = {p.name for p in self._scenes}
+        self._save_pick()
+        self._paint_scenes()
+
+    def _pick_none(self) -> None:
+        self._picked = set()
+        self._save_pick()
+        self._paint_scenes()
 
     def _row_dir(self, parent, row, label, var, cmd) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=3)
@@ -212,7 +385,10 @@ class MillApp(tk.Tk):
         self.series_var.set(d)
         self.in_var.set(str(Path(d) / "in"))
         self.out_var.set(str(Path(d) / "out"))
-        self.lock_var.set(str(Path(d) / "lock"))
+        lock = Path(d) / "lock"
+        if lock.is_dir():
+            self.lock_var.set(str(lock))
+        self._refresh_scenes()
 
     def _pick_dir(self, var: tk.StringVar) -> None:
         d = filedialog.askdirectory(initialdir=var.get() or DEFAULT_BASE)
@@ -220,67 +396,60 @@ class MillApp(tk.Tk):
             var.set(d)
 
     def _make_folders(self) -> None:
-        for v in (self.in_var, self.out_var, self.lock_var):
-            Path(v.get()).mkdir(parents=True, exist_ok=True)
-        lock = Path(self.lock_var.get())
-        samples = {
-            "prompt.txt": (
-                "Japanese-to-English web novel translator. English only. "
-                "No refusal, synopsis, notes, or Japanese output.\n"
-                "Keep 「」『』（）！？…〜ー. Convert only 。 to . and 、 to ,.\n"
-                "「」 = spoken. （） = inner voice of the person who just acted or spoke, FIRST PERSON.\n"
-                "Onomatopoeia: romaji only (Bassaa, Kyaa). No Slash/WHOOSH/BAM.\n"
-                "Drop 青空 ［＃…］ markup rather than explaining it.\n"
-            ),
-            "glossary.txt": "小泉晴道 = Harumichi Koizumi\n如月千紗 = Chisa Kisaragi\n",
-            "voices.txt": (
-                "（） after Chisa acts/speaks: I is Chisa.\n"
-                "あんなに元気 in that thought is Harumichi, not Chisa.\n"
-            ),
-        }
-        created = []
-        for name, text in samples.items():
-            p = lock / name
-            if not p.exists():
-                write_text(p, text)
-                created.append(name)
-        self._log(f"Folders ready. Sample lock written: {', '.join(created) or 'already existed'}")
-        messagebox.showinfo(APP_TITLE, "Created in / out / lock (sample lock files if missing).")
+        for var in (self.in_var, self.out_var, self.lock_var):
+            Path(var.get()).mkdir(parents=True, exist_ok=True)
+        self.status_var.set("Folders ready.")
 
     def _ping(self) -> None:
         url = self.api_var.get().rstrip("/") + "/models"
         try:
-            req = Request(url, headers={"Authorization": f"Bearer {self.key_var.get()}"})
+            req = Request(url, headers={"Authorization": f"Bearer {self.key_var.get() or DEFAULT_KEY}"})
             with urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-            ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
-            self._log("API OK. Models: " + (", ".join(ids) if ids else "(none listed)"))
-            if ids and self.model_var.get() not in ids:
-                self._log("Warning: configured model name is not in the list. Copy one id into Model.")
+            ids = [m.get("id") for m in (data.get("data") or []) if m.get("id")]
+            self._log("Models: " + (", ".join(ids) or "(none)"))
+            self.status_var.set("API ok.")
         except Exception as e:
-            self._log(f"Ping failed: {e}")
             messagebox.showerror(APP_TITLE, str(e))
+
+    def _combine_out(self) -> None:
+        out_dir = Path(self.out_var.get().strip())
+        series = Path(self.series_var.get().strip() or out_dir.parent)
+        dest = series / "english_full.txt"
+        try:
+            from wn_series import stitch_en_texts
+
+            n, dest = stitch_en_texts(out_dir, dest)
+        except Exception as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
+        self.status_var.set(f"Combined {n} EN files → {dest}")
+        self._log(f"Combined {n} files → {dest}")
+        messagebox.showinfo(APP_TITLE, f"Wrote {n} shards to:\n{dest}")
+
+    def _on_close(self) -> None:
+        self.stop_event.set()
+        (self._own_root or self.winfo_toplevel()).destroy()
 
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
         in_dir = Path(self.in_var.get())
-        out_dir = Path(self.out_var.get())
-        lock_dir = Path(self.lock_var.get())
         if not in_dir.is_dir():
             messagebox.showerror(APP_TITLE, f"Input folder missing:\n{in_dir}")
             return
-        files = scene_files(in_dir)
+        files = [p for p in scene_files(in_dir) if p.name in self._picked]
         if not files:
-            messagebox.showerror(APP_TITLE, f"No .txt files in:\n{in_dir}")
+            messagebox.showerror(APP_TITLE, "No scenes checked. Refresh, then tick the files to mill.")
             return
         try:
             temp = float(self.temp_var.get())
             timeout = int(self.timeout_var.get())
+            pause = float(self.pause_var.get())
+            ctx = int(self.ctx_var.get())
         except ValueError:
-            messagebox.showerror(APP_TITLE, "Temp must be a float, timeout an integer.")
+            messagebox.showerror(APP_TITLE, "Temp, timeout, pause, and context must be numbers.")
             return
-
         self.stop_event.clear()
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
@@ -290,14 +459,16 @@ class MillApp(tk.Tk):
             target=self._run_queue,
             args=(
                 files,
-                out_dir,
-                lock_dir,
+                Path(self.out_var.get()),
+                Path(self.lock_var.get()),
                 self.api_var.get().strip(),
                 self.key_var.get().strip() or DEFAULT_KEY,
                 self.model_var.get().strip(),
                 temp,
                 timeout,
                 self.overwrite_var.get(),
+                pause,
+                ctx,
             ),
             daemon=True,
         )
@@ -308,22 +479,13 @@ class MillApp(tk.Tk):
         self.status_var.set("Stopping after current file…")
         self._log("Stop requested.")
 
-    def _run_queue(
-        self,
-        files: list[Path],
-        out_dir: Path,
-        lock_dir: Path,
-        api: str,
-        key: str,
-        model: str,
-        temp: float,
-        timeout: int,
-        overwrite: bool,
-    ) -> None:
+    def _run_queue(self, files, out_dir, lock_dir, api, key, model, temp, timeout, overwrite, pause=4.0, ctx=8192):
         try:
             system = build_system(lock_dir)
+            self._log(f"Mill {__version__}  timeout={timeout}s pause={pause}s ctx={ctx}")
             self._log(f"System prompt {len(system)} chars from {lock_dir}")
             done = skip = fail = 0
+            streak = 0
             total = len(files)
             for i, src in enumerate(files, start=1):
                 if self.stop_event.is_set():
@@ -337,32 +499,82 @@ class MillApp(tk.Tk):
                     self.progress["value"] = i
                     continue
                 jp = read_text(src).strip()
+                try:
+                    from wn_series import strip_page_numbers
+                    jp = strip_page_numbers(jp).strip()
+                except Exception:
+                    pass
                 if not jp:
                     self._log(f"SKIP {src.name} (empty)")
                     skip += 1
                     self.progress["value"] = i
                     continue
+                if len(jp) < MIN_SCENE_CHARS:
+                    self._log(f"SKIP {src.name} ({len(jp)} chars, stub)")
+                    skip += 1
+                    self.progress["value"] = i
+                    continue
                 user = USER_PREFIX + jp + USER_SUFFIX
-                self._log(f"SEND {src.name}  ({len(jp)} chars)")
+                prompt_est = max(1, (len(system) + len(user)) // 2)
+                max_tok = max(128, ctx - prompt_est)
+                self._log(f"SEND {src.name}  ({len(jp)} chars ~{prompt_est} tok, max_out={max_tok})")
                 t0 = time.time()
+                en = ""
+                err = ""
                 try:
-                    en = post_chat(api, key, model, system, user, temp, timeout)
+                    en = post_chat(api, key, model, system, user, temp, timeout, max_tok)
                 except Exception as e:
+                    err = str(e)
+                    low = err.lower()
+                    if "timed out" in low or "channel" in low or "fetch failed" in low:
+                        self._log(f"{src.name}: {err.split(':')[0]}. Cool 45s then retry once")
+                        self._pause(45)
+                        if self.stop_event.is_set():
+                            break
+                        try:
+                            en = post_chat(api, key, model, system, user, temp, timeout, max_tok)
+                            err = ""
+                        except Exception as e2:
+                            err = str(e2)
+                if not err and not (en or "").strip():
+                    err = "empty completion"
+                if err:
                     fail += 1
-                    self._log(f"FAIL {src.name}: {e}")
-                    if "exceeds" in str(e).lower() and "context" in str(e).lower():
+                    streak += 1
+                    self._log(f"FAIL {src.name}: {err}")
+                    if "exceeds" in err.lower() and "context" in err.lower():
                         self._log("Context overflow. Split this scene smaller.")
-                    break
-                elapsed = time.time() - t0
+                    self.progress["value"] = i
+                    if streak >= 3:
+                        self._log("Three LMS faults in a row. Stopping so the GPU can recover.")
+                        break
+                    self._pause(max(pause, 20))
+                    continue
+                streak = 0
+                en = en.replace("\r\n", "\n").strip()
+                while en.endswith("⸻") or en.endswith("─") or en.endswith("—"):
+                    en = en.rstrip(" \t\n─—–―⸻")
                 write_text(dest, en + "\n")
                 done += 1
-                self._log(f"OK   {dest.name}  {len(en)} chars  {elapsed:.1f}s")
+                self._log(f"OK   {dest.name}  {len(en)} chars  {time.time() - t0:.1f}s")
                 self.progress["value"] = i
+                self._pause(pause)
             self.status_var.set(f"Done. ok={done} skip={skip} fail={fail}")
             self._log(self.status_var.get())
+            self.after(0, self._refresh_scenes)
         finally:
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
+
+    def _pause(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        self._log(f"Wait {seconds:.0f}s")
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self.stop_event.is_set():
+                return
+            time.sleep(0.2)
 
     def _log(self, msg: str) -> None:
         self.log_q.put(time.strftime("%H:%M:%S ") + msg)
@@ -379,9 +591,8 @@ class MillApp(tk.Tk):
             pass
         self.after(120, self._drain_log)
 
-    def _on_close(self) -> None:
-        self.stop_event.set()
-        self.destroy()
+    def mainloop(self, n: int = 0):
+        (self._own_root or self.winfo_toplevel()).mainloop(n)
 
 
 def main() -> None:

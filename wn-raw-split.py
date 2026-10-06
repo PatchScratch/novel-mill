@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# WN Raw Split — split one novel dump (JP/EN/CN/KR WN or LN) into files.
+# Novel Mill — Split tab. One UTF-8 dump → in\*.txt by heading / page tag / rule.
 # Windows: py -3 wn-raw-split.py
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-APP_TITLE = "WN Raw Split"
-DEFAULT_RAW = r"D:\Translation Software\WN-Work\_series\n7183mn\raw_full.txt"
-DEFAULT_OUT = r"D:\Translation Software\WN-Work\_series\n7183mn\in"
+APP_TITLE = "Split"
+DEFAULT_RAW = ""
+DEFAULT_OUT = ""
 
 MAX_HEADING_LEN = 80
 __version__ = "1.0.0"
@@ -60,6 +60,7 @@ MODES: list[tuple[str, str]] = [
     ("scene", "Scene001"),
     ("named", "Prologue / プロローグ / 閑話 / Afterword"),
     ("volume", "Volume / 第N巻 / 第N部"),
+    ("ocr_page", "[0017] OCR page tags (stitched raw_full)"),
     ("pagebreak", "［＃改ページ］ / page break"),
     ("rule", "⸻ ─── * * * rules only"),
     ("custom", "Custom regex (Python)"),
@@ -73,8 +74,9 @@ HEADING_START = re.compile(
 )
 RE_PAGE = re.compile(r"［＃改ページ］|\[pagebreak\]|<!--\s*pagebreak\s*-->", re.I)
 RE_RULE = re.compile(
-    r"^[\s　]*(?:[⸻─－—_*＊※~～]{3,}|(?:\*\s*){3,}|(?:＊\s*){3,})[\s　]*$"
+    r"^[\s　]*(?:⸻+|──+|━━+|[─－—_*＊※~～]{3,}|(?:\*\s*){3,}|(?:＊\s*){3,})[\s　]*$"
 )
+RE_OCR_PAGE = re.compile(r"^[\s　]*\[([0-9A-Za-z._\-]+)\][\s　]*$")
 
 # Short-line chapter headings. Keep anchored; dialogue rarely matches the whole line.
 RE_WA = re.compile(
@@ -128,6 +130,7 @@ ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 # Auto prefers real chapter families over decorative breaks.
 AUTO_PRIORITY = [
+    "ocr_page",
     "aozora_dai",
     "generic",
     "wa",
@@ -214,14 +217,45 @@ def collect_user_rule(lines: list[str], rule: UserRule) -> list[tuple[int, str]]
     return out
 
 
+def _cjk_count(text: str) -> int:
+    n = 0
+    for ch in text:
+        o = ord(ch)
+        if 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF:
+            n += 1
+    return n
+
+
 def read_text(path: Path) -> str:
     data = path.read_bytes()
-    for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "gb18030", "euc-kr"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("utf-8", errors="replace")
+    if not data:
+        raise ValueError(f"{path.name} is empty.")
+    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
+        text = data.decode("utf-16")
+    elif len(data) >= 4 and data[1:4:2] == b"\x00\x00" and data[0] != 0:
+        text = data.decode("utf-16-le")
+    else:
+        text = None
+        for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "gb18030"):
+            try:
+                cand = data.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            if cand.count("\ufffd") > 8:
+                continue
+            text = cand
+            break
+        if text is None:
+            raise ValueError(
+                f"{path.name} is not UTF-8 / UTF-16 / CP932 text.\n"
+                "In Notepad: Save As → Encoding UTF-8. Do not split a binary file."
+            )
+    if text.count("\ufffd") > 20 or (len(text) > 200 and _cjk_count(text) < 8 and "\x00" in text):
+        raise ValueError(
+            f"{path.name} looks like broken encoding or binary.\n"
+            "Re-save raw_full.txt as UTF-8 and delete the old in\\ files."
+        )
+    return text
 
 
 def write_text(path: Path, text: str) -> None:
@@ -353,6 +387,13 @@ def collect_starts(lines: list[str], mode: str, custom: str) -> list[tuple[int, 
         return collect_regex(lines, RE_NAMED)
     if mode == "volume":
         return collect_regex(lines, RE_VOLUME)
+    if mode == "ocr_page":
+        out = []
+        for i, line in enumerate(lines):
+            m = RE_OCR_PAGE.match(line)
+            if m:
+                out.append((i, m.group(1)))
+        return out
     if mode == "pagebreak":
         out: list[tuple[int, str]] = []
         for i, line in enumerate(lines):
@@ -416,7 +457,9 @@ def pick_auto(lines: list[str]) -> str:
     for key in keys:
         n = score_mode(lines, key)
         weight = float(n)
-        if key in ("rule", "pagebreak"):
+        if key == "ocr_page":
+            weight = n * 3.0
+        elif key in ("rule", "pagebreak"):
             weight = n * 0.2
         elif key == "generic":
             weight = n * 1.05
@@ -438,7 +481,17 @@ def filename_for(part: Split, pad: int) -> str:
     return f"{part.index:0{pad}d}_{safe_stem(part.title, f'part_{part.index}')}.txt"
 
 
+def _strip_pages(text: str) -> str:
+    try:
+        from wn_series import strip_page_numbers
+        return strip_page_numbers(text)
+    except Exception:
+        text = RE_OCR_PAGE.sub("", text)
+        return text
+
+
 def strip_markup(text: str) -> str:
+    text = _strip_pages(text)
     text = HEADING_START.sub("", text)
     text = HEADING_END.sub("", text)
     text = RE_PAGE.sub("", text)
@@ -449,12 +502,18 @@ def strip_markup(text: str) -> str:
     return text.strip() + "\n"
 
 
-class SplitApp(tk.Tk):
-    def __init__(self) -> None:
-        super().__init__()
-        self.title(APP_TITLE)
-        self.geometry("1000x720")
-        self.minsize(840, 560)
+class SplitApp(ttk.Frame):
+    def __init__(self, master: tk.Misc | None = None) -> None:
+        own = master is None
+        if own:
+            master = tk.Tk()
+            master.title(APP_TITLE)
+            master.geometry("1000x720")
+            master.minsize(840, 560)
+        super().__init__(master)
+        if own:
+            self.pack(fill="both", expand=True)
+        self._own_root = master if own else None
 
         self.raw_var = tk.StringVar(value=DEFAULT_RAW)
         self.out_var = tk.StringVar(value=DEFAULT_OUT)
@@ -474,48 +533,64 @@ class SplitApp(tk.Tk):
         root = ttk.Frame(self)
         root.pack(fill="both", expand=True)
 
-        files = ttk.LabelFrame(root, text="Files")
-        files.pack(fill="x", **pad)
-        ttk.Label(files, text="Raw dump").grid(row=0, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(files, textvariable=self.raw_var).grid(row=0, column=1, sticky="ew", padx=4)
-        ttk.Button(files, text="Browse", command=self._pick_raw).grid(row=0, column=2, padx=6)
-        ttk.Label(files, text="Write to").grid(row=1, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(files, textvariable=self.out_var).grid(row=1, column=1, sticky="ew", padx=4)
-        ttk.Button(files, text="Browse", command=self._pick_out).grid(row=1, column=2, padx=6)
-        ttk.Label(files, text="Rules JSON").grid(row=2, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(files, textvariable=self.rules_var).grid(row=2, column=1, sticky="ew", padx=4)
-        ttk.Button(files, text="Browse", command=self._pick_rules).grid(row=2, column=2, padx=6)
-        files.columnconfigure(1, weight=1)
+        self.files_fr = ttk.LabelFrame(root, text="Files")
+        self.files_fr.pack(fill="x", **pad)
+        ttk.Label(self.files_fr, text="raw_full.txt").grid(row=0, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(self.files_fr, textvariable=self.raw_var).grid(row=0, column=1, sticky="ew", padx=4)
+        self.btn_raw = ttk.Button(self.files_fr, text="Browse", command=self._pick_raw)
+        self.btn_raw.grid(row=0, column=2, padx=6)
+        self.lbl_scenes = ttk.Label(self.files_fr, text="Scenes (in\\)")
+        self.lbl_scenes.grid(row=1, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(self.files_fr, textvariable=self.out_var).grid(row=1, column=1, sticky="ew", padx=4)
+        self.btn_out = ttk.Button(self.files_fr, text="Browse", command=self._pick_out)
+        self.btn_out.grid(row=1, column=2, padx=6)
+        self.lbl_rules = ttk.Label(self.files_fr, text="Rules JSON")
+        self.lbl_rules.grid(row=2, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(self.files_fr, textvariable=self.rules_var).grid(row=2, column=1, sticky="ew", padx=4)
+        self.btn_rules = ttk.Button(self.files_fr, text="Browse", command=self._pick_rules)
+        self.btn_rules.grid(row=2, column=2, padx=6)
+        self.files_fr.columnconfigure(1, weight=1)
 
-        opts = ttk.LabelFrame(root, text="Split on")
-        opts.pack(fill="x", **pad)
-        ttk.Label(opts, text="Mode").grid(row=0, column=0, sticky="w", padx=6, pady=3)
+        self.opts_fr = ttk.LabelFrame(root, text="Split on")
+        self.opts_fr.pack(fill="x", **pad)
+        self.lbl_mode = ttk.Label(self.opts_fr, text="Mode")
+        self.lbl_mode.grid(row=0, column=0, sticky="w", padx=6, pady=3)
         self.mode_combo = ttk.Combobox(
-            opts, values=[lab for _k, lab in MODES], state="readonly", width=46
+            self.opts_fr, values=[lab for _k, lab in MODES], state="readonly", width=46
         )
         self.mode_combo.current(0)
         self.mode_combo.grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Label(opts, text="Custom regex").grid(row=1, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(opts, textvariable=self.custom_var).grid(row=1, column=1, sticky="ew", padx=4)
-        ttk.Checkbutton(
-            opts,
+        self.lbl_regex = ttk.Label(self.opts_fr, text="Custom regex")
+        self.lbl_regex.grid(row=1, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(self.opts_fr, textvariable=self.custom_var).grid(row=1, column=1, sticky="ew", padx=4)
+        self.chk_strip = ttk.Checkbutton(
+            self.opts_fr,
             text="Strip 青空 / HTML / 《ruby》 from output",
             variable=self.strip_var,
-        ).grid(row=2, column=1, sticky="w", padx=4, pady=2)
-        ttk.Checkbutton(
-            opts,
+        )
+        self.chk_strip.grid(row=2, column=1, sticky="w", padx=4, pady=2)
+        self.chk_front = ttk.Checkbutton(
+            self.opts_fr,
             text="Keep preamble as 000_front.txt (skip in the mill)",
             variable=self.keep_front_var,
-        ).grid(row=3, column=1, sticky="w", padx=4, pady=2)
-        opts.columnconfigure(1, weight=1)
+        )
+        self.chk_front.grid(row=3, column=1, sticky="w", padx=4, pady=2)
+        self.opts_fr.columnconfigure(1, weight=1)
 
         btns = ttk.Frame(root)
         btns.pack(fill="x", **pad)
-        ttk.Button(btns, text="Scan", command=self._scan).pack(side="left", padx=4)
-        ttk.Button(btns, text="Write files", command=self._write).pack(side="left", padx=4)
-        ttk.Button(btns, text="Reload rules", command=self._reload_rules).pack(side="left", padx=4)
-        ttk.Button(btns, text="Add rule", command=self._add_rule).pack(side="left", padx=4)
-        ttk.Button(btns, text="Edit JSON", command=self._edit_json).pack(side="left", padx=4)
+        self.btn_scan = ttk.Button(btns, text="Scan", command=self._scan)
+        self.btn_scan.pack(side="left", padx=4)
+        self.btn_hand = ttk.Button(btns, text="Handoff to Mill", command=self._handoff_mill)
+        self.btn_hand.pack(side="left", padx=4)
+        self.btn_write = ttk.Button(btns, text="Write files", command=self._write)
+        self.btn_write.pack(side="left", padx=4)
+        self.btn_reload = ttk.Button(btns, text="Reload rules", command=self._reload_rules)
+        self.btn_reload.pack(side="left", padx=4)
+        self.btn_add = ttk.Button(btns, text="Add rule", command=self._add_rule)
+        self.btn_add.pack(side="left", padx=4)
+        self.btn_json = ttk.Button(btns, text="Edit JSON", command=self._edit_json)
+        self.btn_json.pack(side="left", padx=4)
 
         ttk.Label(root, textvariable=self.status_var).pack(anchor="w", padx=10)
 
@@ -525,20 +600,48 @@ class SplitApp(tk.Tk):
         right = ttk.Frame(mid)
         mid.add(left, weight=1)
         mid.add(right, weight=1)
-        ttk.Label(left, text="Parts").pack(anchor="w")
+        self.lbl_parts = ttk.Label(left, text="Parts")
+        self.lbl_parts.pack(anchor="w")
         self.listbox = tk.Listbox(left, height=18)
         self.listbox.pack(fill="both", expand=True)
         self.listbox.bind("<<ListboxSelect>>", self._show_part)
-        ttk.Label(right, text="Preview").pack(anchor="w")
+        self.lbl_prev = ttk.Label(right, text="Preview")
+        self.lbl_prev.pack(anchor="w")
         self.preview = tk.Text(right, wrap="word", height=18)
         self.preview.pack(fill="both", expand=True)
 
-        ttk.Label(
+        self.hint_lbl = ttk.Label(
             root,
-            text="Add splitters in wn-raw-split.rules.json (id, label, pattern). "
-            "Reload rules, then Scan. Use Scene only to subdivide a fat episode.",
-            foreground="#444",
-        ).pack(anchor="w", padx=10, pady=(0, 8))
+            text="Add splitters in wn-raw-split.rules.json (id, label, pattern).",
+            foreground="#888",
+        )
+        self.hint_lbl.pack(anchor="w", padx=10, pady=(0, 8))
+        self._ui_lang = "en"
+
+    def set_ui_lang(self, lang: str) -> None:
+        ja = lang != "en"
+        self.files_fr.configure(text="ファイル" if ja else "Files")
+        self.opts_fr.configure(text="分割条件" if ja else "Split on")
+        self.lbl_scenes.configure(text="シーン (in\\)" if ja else "Scenes (in\\)")
+        self.lbl_rules.configure(text="ルール JSON" if ja else "Rules JSON")
+        self.lbl_mode.configure(text="モード" if ja else "Mode")
+        self.lbl_regex.configure(text="カスタム正規表現" if ja else "Custom regex")
+        for b in (self.btn_raw, self.btn_out, self.btn_rules):
+            b.configure(text="参照" if ja else "Browse")
+        self.chk_strip.configure(text="青空 / HTML / 《ルビ》を除去" if ja else "Strip 青空 / HTML / 《ruby》 from output")
+        self.chk_front.configure(text="前書きを 000_front.txt に残す" if ja else "Keep preamble as 000_front.txt (skip in the mill)")
+        self.btn_scan.configure(text="スキャン" if ja else "Scan")
+        self.btn_hand.configure(text="ミルへ渡す" if ja else "Handoff to Mill")
+        self.btn_write.configure(text="書き出し" if ja else "Write files")
+        self.btn_reload.configure(text="ルール再読込" if ja else "Reload rules")
+        self.btn_add.configure(text="ルール追加" if ja else "Add rule")
+        self.btn_json.configure(text="JSON 編集" if ja else "Edit JSON")
+        self.lbl_parts.configure(text="分割結果" if ja else "Parts")
+        self.lbl_prev.configure(text="プレビュー" if ja else "Preview")
+        self.hint_lbl.configure(
+            text="wn-raw-split.rules.json に分割ルールを追加できます。" if ja
+            else "Add splitters in wn-raw-split.rules.json (id, label, pattern)."
+        )
 
     def _mode_key(self) -> str:
         label = self.mode_combo.get()
@@ -619,6 +722,15 @@ class SplitApp(tk.Tk):
         except AttributeError:
             os.system(f'xdg-open "{path}"')
 
+    def apply_series(self, layout: dict) -> None:
+        self.raw_var.set(str(layout["raw"]))
+        self.out_var.set(str(layout["in_dir"]))
+
+    def _handoff_mill(self) -> None:
+        fn = getattr(self, "handoff_mill", None)
+        if callable(fn):
+            fn()
+
     def _pick_raw(self) -> None:
         p = filedialog.askopenfilename(
             initialdir=str(Path(self.raw_var.get()).parent),
@@ -639,7 +751,11 @@ class SplitApp(tk.Tk):
         if not path.is_file():
             messagebox.showerror(APP_TITLE, f"Raw file not found:\n{path}")
             return
-        raw = read_text(path)
+        try:
+            raw = read_text(path)
+        except ValueError as e:
+            messagebox.showerror(APP_TITLE, str(e))
+            return
         self.lines = lines_of(raw)
         mode = self._mode_key()
         used = mode
@@ -685,7 +801,7 @@ class SplitApp(tk.Tk):
         if not sel:
             return
         part = self.parts[sel[0]]
-        body = strip_markup(part.body) if self.strip_var.get() else part.body
+        body = strip_markup(part.body) if self.strip_var.get() else _strip_pages(part.body)
         self.preview.delete("1.0", "end")
         extra = "\n\n… [truncated preview]" if len(body) > 8000 else ""
         self.preview.insert("1.0", body[:8000] + extra)
@@ -699,11 +815,16 @@ class SplitApp(tk.Tk):
         pad = max(2, len(str(max(p.index for p in self.parts))))
         written = 0
         for part in self.parts:
-            body = strip_markup(part.body) if self.strip_var.get() else part.body
+            body = strip_markup(part.body) if self.strip_var.get() else _strip_pages(part.body)
             write_text(out / filename_for(part, pad), body)
             written += 1
         self.status_var.set(f"Wrote {written} files to {out}")
         messagebox.showinfo(APP_TITLE, f"Wrote {written} files to:\n{out}")
+
+
+    def mainloop(self, n: int = 0):  # type: ignore[override]
+        root = self._own_root or self.winfo_toplevel()
+        root.mainloop(n)
 
 
 def main() -> None:

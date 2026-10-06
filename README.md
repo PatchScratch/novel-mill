@@ -1,99 +1,79 @@
 # Novel Mill
 
-A small Windows (and Linux) desktop app that turns a Japanese **web novel** or **light novel** into English scene files using a model you run yourself in LM Studio.
+Novel Mill translates a Japanese web novel or light novel into English, one scene at a time. You bring the book. The app extracts it, splits it, and sends each scene to a model. English comes back as `out\*.en.txt`.
 
-The GitHub folder is still called `wn-local-mill`. That is only the old project name. The window title is **Novel Mill**. Leave the `.py` file names alone so an existing install folder keeps working.
+It is a desktop app for Windows and Linux. The window title is Novel Mill. Script names stay `wn-*.py`.
 
-There is no cloud account and no second AI server in this app. The mill talks only to LM Studio on `http://127.0.0.1:1234`.
+## Requirements
 
-## What you need
+Mill needs a running model server. OCR needs Tesseract. Neither is bundled.
 
-- Python 3 on the PATH (`py -3` on Windows)
-- LM Studio, model loaded, Developer server on port 1234
-- For scanned pages: Tesseract-OCR with `jpn` and `jpn_vert` traineddata
-- For store EPUBs: Calibre. Convert EPUB to EPUB (or TXT) so Adobe DRM is gone before you Extract
+- **LM Studio** (required to translate). Load a model with context **8192** and parallel slots **1**. Turn on the local server at `http://127.0.0.1:1234`. 4096 is too small once lock files are included.
+- **Tesseract OCR** (required for scanned pages). Install `jpn` and `jpn_vert` traineddata. Text EPUBs do not need it.
+- **Python 3** on the PATH, if you run from source (`py -3` on Windows).
+- **Calibre**, only for store EPUBs. Convert EPUB to EPUB so Adobe DRM is gone before Extract.
 
-## How to run
+## Install
 
-1. Close Novel Mill if it is open.
-2. Copy the files from this repo over your existing Novel Mill folder (same names).
-3. Double-click `wn-local-mill.bat`.
-4. In LM Studio, load the model with **context 8192** (4096 is too small once lock files are included).
+Unzip, then double-click `wn-local-mill.bat` (Windows) or run `python3 wn-local-mill.py` (Linux). Python 3 must be on the PATH.
 
-Standalone bats still open one tab as its own window. Day to day, use the tabbed host.
+Book folders are not part of the install. Theme, language, and the scene tick list are saved under `%APPDATA%\NovelMill` (Windows) or `~/.config/novel_mill` (Linux).
 
-## The five tabs
+## Tabs
 
 | Tab | What it does |
 | --- | --- |
-| **EPUB** | Opens a DRM-free EPUB, writes chapter text into `in/` and pictures into `images/`. Refuses Adobe AES / ADEPT files. |
-| **OCR** | Runs Tesseract on a folder of page pictures. Writes `ocr/*.ocr.txt`. **Combine** stitches those into `raw_full.txt`. |
-| **Split** | Cuts one big Japanese dump (`raw_full.txt`) into many small files in `in/`. |
-| **Mill** | Sends each `in/*.txt` to LM Studio, one HTTP request per file. Writes `out/*.en.txt`. |
-| **Settings** | The shared **book folder**. Apply to tabs so every tab points at the same tree. |
+| **EPUB** | DRM-free EPUB to `in\` text and `images\`. Refuses Adobe AES. |
+| **OCR** | Tesseract on page pictures. Combine writes `raw_full.txt`. |
+| **Split** | One Japanese dump into scene files in `in\`. |
+| **Mill** | One HTTP request per ticked scene. Writes `out\*.en.txt`. |
+| **Settings** | Book folder, appearance (System / Dark / Light), language (日本語 / English). |
 
-Usual path: EPUB (or OCR then Combine) then Split then Mill.
+Text EPUB: Extract, Split only if a chapter is huge, then Mill. Scanned book: OCR, Combine, Split, Mill.
 
-## Book folder layout
+Tick scenes on the Mill tab for a partial run. **Missing only** resumes files that have no `.en.txt`. Keep existing skips finished scenes.
 
-One folder per WN series or per LN volume:
+## Book folder
 
-    my-book/
-      raw_full.txt
-      in/
-      out/
-      images/
-      ocr/
-      lock/
-        prompt.txt
-        glossary.txt
-        voices.txt
+```
+my-book\
+  raw_full.txt
+  in\
+  out\
+  images\
+  ocr\
+  lock\
+    prompt.txt
+    glossary.txt
+    voices.txt
+```
 
-Default folder fields in the app are empty on purpose. Point Settings at your book folder. No sample novel path is shipped in the source.
+Lock files are optional. They set names, speech marks, and tone, and they use context tokens.
 
-## Words we use
+Files on disk must be UTF-8. A garbled `raw_full.txt` is a bad export, not a vertical-script problem. Rebuild it from a DRM-free EPUB or from OCR.
 
-**WN** — Web novel.
+## Mill
 
-**LN** — Light novel.
+- API base `http://127.0.0.1:1234/v1`
+- Model id must match `/v1/models`
+- Context box must match the LM Studio load
+- Pause default 10 seconds
+- Timeout default 1200 seconds
+- Three LM Studio faults in a row stop the queue
 
-**Book folder** — The one directory that holds `in`, `out`, `raw_full.txt`.
+A volume of about 30 chapters is often 3–5 hours on an RTX 3070 with a 12B Q4 model, if stubs and `_break` files are skipped.
 
-**Scene** — One file in `in/`. One HTTP request per file.
+## Future features
 
-**Shard** — One scene file or one `*.en.txt`.
+- Cloud models through the OpenAI chat-completions API: ChatGPT, Grok, OpenRouter, and any other host that speaks that format. This release talks only to LM Studio on `http://127.0.0.1:1234`.
+- A Windows exe and a Linux Flatpak, so Python does not have to be installed first.
 
-**Dump / raw_full.txt** — The whole Japanese book as one UTF-8 file.
+## Not this project
 
-**Split** — Cutting the dump on headings or page tags.
+Not a downloader. For web novel downloads, use [novel_downloader](https://github.com/ayati/novel_downloader). Export a text dump, then open that dump here.
 
-**_break.txt** — Rule-mode leftovers. Not extra chapters. Delete them.
-
-**Stub** — Tiny illustration pages. The mill skips bodies under 80 characters.
-
-**Mill** — The LM Studio loop. No memory of the previous scene.
-
-**Lock** — prompt.txt + glossary.txt + voices.txt.
-
-**Context** — Token window of the loaded model. Set it in LM Studio and in the Mill Context box.
-
-**Pause** — Seconds between scenes. Default 10.
-
-**DRM / ADEPT** — Adobe encryption. Convert in Calibre first.
-
-**Combine** — OCR texts to raw_full.txt, or English shards to english_full.txt.
-
-## Encoding
-
-Everything on disk must be UTF-8.
-
-## What this project is not
-
-- Not Novel Downloader
-- Not Translation Aggregator
-- Not an in-app reader, TTS, or cloud queue
-- Not a DRM remover
+Not Translation Aggregator. Not a reader, TTS, or DRM remover.
 
 ## Licence
 
-See LICENSE.
+MIT. See `LICENSE`.

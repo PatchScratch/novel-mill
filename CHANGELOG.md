@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.0 — 2026-10-06
+
+- README rewritten for a public release: translation up front, LM Studio and Tesseract called out as requirements. Future work is its own section.
+- Mill can tick scenes for a partial run. Selection is saved locally, not in the book folder.
+- Appearance: System / Dark / Light. Language: 日本語 / English.
+- Existing `.en.txt` is Keep existing | Overwrite.
+
 ## 1.7.0 — 2026-09-22
 
 - Display name is **Novel Mill** (WN and LN). Repo folder name unchanged.
