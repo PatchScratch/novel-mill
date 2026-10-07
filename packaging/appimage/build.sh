@@ -34,4 +34,5 @@ mkdir -p /src/dist
 cd /tmp
 ARCH=x86_64 /tmp/appimagetool --appimage-extract-and-run "$APPDIR" \
     /src/dist/NovelMill-x86_64.AppImage
+chmod 755 /src/dist/NovelMill-x86_64.AppImage
 ls -la /src/dist/

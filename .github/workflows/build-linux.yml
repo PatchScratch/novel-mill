@@ -28,7 +28,8 @@ jobs:
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q \
             xvfb libx11-6 libxft2 libxext6 libxrender1 fontconfig
-          chmod +x dist/NovelMill-x86_64.AppImage
+          # appimagetool output is root-owned (built in the container) and
+          # already 755; the runner user must not try to chmod it.
           xvfb-run -a timeout 40 \
             ./dist/NovelMill-x86_64.AppImage --appimage-extract-and-run \
             >/tmp/gui.log 2>&1 &
