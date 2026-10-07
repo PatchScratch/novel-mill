@@ -22,7 +22,7 @@ jobs:
         run: |
           mkdir -p dist
           docker run --rm -v "$PWD:/src" quay.io/pypa/manylinux_2_28_x86_64 \
-            /src/packaging/appimage/build.sh
+            sh /src/packaging/appimage/build.sh
 
       - name: Smoke test (headless GUI)
         run: |
