@@ -1,0 +1,47 @@
+name: Build Windows release
+
+# Builds the PyInstaller exe on every tag (v*) and attaches it to the
+# matching GitHub release. Also runnable manually.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install pyinstaller
+
+      - name: Build
+        run: pyinstaller --noconfirm build_windows.spec
+
+      - name: Rename with version
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          if ($ver -eq "" -or $ver -eq "main") { $ver = "dev" }
+          Move-Item dist/NovelMill.exe "dist/NovelMill-$ver-win64.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: dist/*.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/*.exe --clobber

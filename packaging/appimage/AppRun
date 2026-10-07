@@ -1,0 +1,5 @@
+#!/bin/sh
+# AppRun for the Novel Mill AppImage. The PyInstaller onedir contents
+# (NovelMill binary + _internal/) sit directly under usr/bin.
+here="$(dirname "$(readlink -f "$0")")"
+exec "$here/usr/bin/NovelMill" "$@"

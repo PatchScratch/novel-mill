@@ -7,12 +7,8 @@
 from __future__ import annotations
 
 import html
-import os
 import posixpath
 import re
-import shutil
-import subprocess
-import tempfile
 import tkinter as tk
 import zipfile
 from html.parser import HTMLParser
@@ -20,18 +16,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from xml.etree import ElementTree as ET
 
-__version__ = "1.4.0"
+from wn_series import ILLEGAL, IMAGE_EXT, app_version, safe_stem, strip_page_numbers
+
+__version__ = app_version()
 APP_TITLE = "EPUB"
 DEFAULT_SERIES = r""
 DEFAULT_OUT = str(Path(DEFAULT_SERIES) / "in")
 DEFAULT_IMG = str(Path(DEFAULT_SERIES) / "images")
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".tif", ".tiff"}
-OCR_EXT = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
-TESS_CANDIDATES = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    "tesseract",
-)
 
 NS = {
     "c": "urn:oasis:names:tc:opendocument:xmlns:container",
@@ -41,7 +32,6 @@ NS = {
     "epub": "http://www.idpf.org/2007/ops",
 }
 
-ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 SKIP_STEMS = re.compile(
     r"(nav|toc|ncx|cover|titlepage|copyright|colophon|dedication|contents)",
     re.I,
@@ -208,13 +198,11 @@ def nav_titles(zf: zipfile.ZipFile, opf: str) -> dict[str, str]:
     out: dict[str, str] = {}
     names = zf.namelist()
     base = dirname_pos(opf)
-    candidates = [
-        n for n in names
-        if n.lower().endswith((".xhtml", ".html", ".ncx"))
-        and re.search(r"(nav|toc|ncx)", n, re.I)
-    ]
-    # also any item marked nav — already covered by name heuristic
-    for name in candidates:
+    for name in names:
+        low = name.lower()
+        is_ncx = low.endswith(".ncx")
+        if not is_ncx and not (low.endswith((".xhtml", ".html")) and re.search(r"(nav|toc)", low)):
+            continue
         try:
             raw = zf.read(name)
         except KeyError:
@@ -223,25 +211,34 @@ def nav_titles(zf: zipfile.ZipFile, opf: str) -> dict[str, str]:
             root = read_xml(raw)
         except ET.ParseError:
             continue
-        nav_dir = dirname_pos(name)
-        for el in root.iter():
-            tag = local(el.tag).lower()
-            href = el.attrib.get("href") or el.attrib.get("src")
-            if tag == "content":
-                href = el.attrib.get("src")
-            if not href:
-                continue
-            path = join_pos(nav_dir if "ncx" not in name.lower() else base, href)
-            label = ""
-            if tag in ("a", "navlabel"):
+        if is_ncx:
+            # EPUB2: navMap > navPoint > navLabel > text + content src=…
+            for np_el in root.iter():
+                if local(np_el.tag).lower() != "navpoint":
+                    continue
+                label = ""
+                src = ""
+                for sub in np_el.iter():
+                    t = local(sub.tag).lower()
+                    if t == "text" and not label:
+                        label = (sub.text or "").strip()
+                    elif t == "content" and not src:
+                        src = sub.attrib.get("src") or ""
+                path = join_pos(base, src) if src else ""
+                if path and label and len(label) < 120:
+                    out.setdefault(path, label)
+        else:
+            nav_dir = dirname_pos(name)
+            for el in root.iter():
+                if local(el.tag).lower() != "a":
+                    continue
+                href = el.attrib.get("href")
+                if not href:
+                    continue
+                path = join_pos(nav_dir, href)
                 label = "".join(el.itertext()).strip()
-            elif tag == "content":
-                # sibling/parent navLabel
-                parent = None
-            if not label:
-                label = "".join(el.itertext()).strip()
-            if path and label and len(label) < 120:
-                out.setdefault(path, label)
+                if path and label and len(label) < 120:
+                    out.setdefault(path, label)
     return out
 
 
@@ -270,16 +267,6 @@ def html_to_text(data: bytes) -> tuple[str, list[str], list[str]]:
         stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip() + "\n"
         return stripped, [], []
     return parser.text(), parser.headings, parser.images
-
-
-def safe_stem(text: str, fallback: str) -> str:
-    t = text.strip()
-    t = re.sub(r"\s+", "_", t)
-    t = ILLEGAL.sub("", t)
-    t = t.strip("._ ")
-    if len(t) > 42:
-        t = t[:42].rstrip("._ ")
-    return t or fallback
 
 
 class Chapter:
@@ -404,105 +391,6 @@ def filename_for(ch: Chapter, pad: int) -> str:
     return f"{ch.index:0{pad}d}_{safe_stem(ch.title, f'ch_{ch.index}')}.txt"
 
 
-def find_tesseract(explicit: str = "") -> str | None:
-    if explicit:
-        p = Path(explicit)
-        if p.is_file():
-            return str(p)
-        found = shutil.which(explicit)
-        if found:
-            return found
-    for cand in TESS_CANDIDATES:
-        path = Path(cand)
-        if path.is_file():
-            return str(path)
-        found = shutil.which(cand)
-        if found:
-            return found
-    return None
-
-
-def _ascii_safe(path: Path) -> bool:
-    try:
-        str(path).encode("ascii")
-        return True
-    except UnicodeEncodeError:
-        return False
-
-
-def ocr_image(tess: str, image: Path, lang: str) -> str:
-    if image.suffix.lower() not in OCR_EXT:
-        return ""
-    work = image
-    tmp: Path | None = None
-    if not _ascii_safe(image):
-        ext = image.suffix.lower() or ".jpg"
-        fd, raw = tempfile.mkstemp(prefix="wnocr_", suffix=ext)
-        os.close(fd)
-        tmp = Path(raw)
-        shutil.copyfile(image, tmp)
-        work = tmp
-    cmd = [tess, str(work), "stdout", "-l", lang, "--psm", "6"]
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=180,
-            check=False,
-        )
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Tesseract not found: {tess}") from e
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"Tesseract timed out on {image.name}") from e
-    finally:
-        if tmp is not None:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-    out = proc.stdout.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0 and not out:
-        err = proc.stderr.decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"{image.name}: {err or 'tesseract failed'}")
-    return out
-
-
-def ocr_images(images: list[Path], tess: str, lang: str, dest_dir: Path) -> tuple[dict[str, Path], list[str]]:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    written: dict[str, Path] = {}
-    errors: list[str] = []
-    for img in images:
-        try:
-            text = ocr_image(tess, img, lang)
-        except Exception as e:
-            errors.append(f"{img.name}: {e}")
-            continue
-        if not text:
-            continue
-        out = dest_dir / f"{img.stem}.ocr.txt"
-        out.write_text(text + "\n", encoding="utf-8")
-        written[img.name] = out
-    return written, errors
-
-
-def inject_ocr(body: str, ocr_map: dict[str, Path]) -> str:
-    def repl(m: re.Match[str]) -> str:
-        name = m.group(1)
-        path = ocr_map.get(name)
-        if path is None:
-            stem = Path(name).stem
-            for key, val in ocr_map.items():
-                if Path(key).stem == stem:
-                    path = val
-                    break
-        if path is None:
-            return m.group(0)
-        text = path.read_text(encoding="utf-8").strip()
-        return f"{m.group(0)}\n{text}"
-
-    return re.sub(r"\[image:\s*([^\s\]]+)[^\]]*\]", repl, body)
-
-
 class ExtractApp(ttk.Frame):
     def __init__(self, master: tk.Misc | None = None) -> None:
         own = master is None
@@ -599,7 +487,6 @@ class ExtractApp(ttk.Frame):
         self.hint_lbl = ttk.Label(
             root,
             text="One spine document = one in\\NNN_title.txt for the mill.",
-            foreground="#888",
         )
         self.hint_lbl.pack(anchor="w", padx=10, pady=(0, 8))
         self._ui_lang = "en"
@@ -659,118 +546,6 @@ class ExtractApp(ttk.Frame):
         out = Path(self.out_var.get().strip() or DEFAULT_OUT)
         raw = self.img_var.get().strip()
         return Path(raw) if raw else (out.parent / "images")
-
-    def _folder_images(self, folder: Path) -> list[Path]:
-        if not folder.is_dir():
-            return []
-        ocr_dir = (folder / "ocr").resolve()
-        out: list[Path] = []
-        for p in folder.rglob("*"):
-            if not p.is_file() or p.suffix.lower() not in IMAGE_EXT:
-                continue
-            try:
-                p.resolve().relative_to(ocr_dir)
-                continue
-            except ValueError:
-                out.append(p)
-        return out
-
-    def _copy_into_images(self, sources: list[Path]) -> list[Path]:
-        dest = self._img_dest()
-        dest.mkdir(parents=True, exist_ok=True)
-        copied: list[Path] = []
-        for src in sources:
-            if not src.is_file() or src.suffix.lower() not in IMAGE_EXT:
-                continue
-            name = src.name
-            stem, ext = src.stem, src.suffix
-            n = 2
-            target = dest / name
-            while target.exists():
-                if target.stat().st_size == src.stat().st_size:
-                    copied.append(target)
-                    break
-                target = dest / f"{stem}_{n}{ext}"
-                n += 1
-            else:
-                shutil.copy2(src, target)
-                copied.append(target)
-        return copied
-
-    def _ocr_copied(self, copied: list[Path]) -> int:
-        if not self.ocr_var.get() or not copied:
-            return 0
-        tess = find_tesseract(self.tess_var.get().strip())
-        if not tess:
-            messagebox.showerror(
-                APP_TITLE,
-                "Tesseract not found. Uncheck OCR or install Tesseract-OCR.",
-            )
-            return 0
-        dest = self._img_dest() / "ocr"
-        try:
-            written, errors = ocr_images(copied, tess, self.lang_var.get().strip() or "jpn+eng", dest)
-        except Exception as e:
-            messagebox.showerror(APP_TITLE, str(e))
-            return 0
-        if errors:
-            messagebox.showwarning(APP_TITLE, "OCR skipped some files:\n" + "\n".join(errors[:12]))
-        return len(written)
-
-    def _add_images(self) -> None:
-        paths = filedialog.askopenfilenames(
-            title="Add images",
-            filetypes=[
-                ("Images", "*.jpg *.jpeg *.png *.gif *.webp *.bmp *.tif *.tiff *.svg"),
-                ("All", "*.*"),
-            ],
-        )
-        if not paths:
-            return
-        copied = self._copy_into_images([Path(p) for p in paths])
-        ocr_n = self._ocr_copied(copied)
-        self.status_var.set(
-            f"Added {len(copied)} images to {self._img_dest()}"
-            + (f"; OCR {ocr_n}" if self.ocr_var.get() else "")
-        )
-
-    def _add_image_folder(self) -> None:
-        d = filedialog.askdirectory(title="Folder of images")
-        if not d:
-            return
-        root = Path(d)
-        dest = self._img_dest()
-        found = self._folder_images(root)
-        if not found:
-            messagebox.showinfo(APP_TITLE, f"No images in:\n{root}")
-            return
-        try:
-            same = root.resolve() == dest.resolve()
-            nested = dest.resolve().is_relative_to(root.resolve())
-        except Exception:
-            same = nested = False
-        if same or nested:
-            copied = found
-        else:
-            copied = self._copy_into_images(found)
-        ocr_n = self._ocr_copied(copied)
-        self.status_var.set(
-            f"{'Using' if same or nested else 'Added'} {len(copied)} images in {dest}"
-            + (f"; OCR {ocr_n}" if self.ocr_var.get() else "")
-        )
-        messagebox.showinfo(
-            APP_TITLE,
-            f"{len(copied)} images in:\n{dest}"
-            + (f"\nOCR files: {ocr_n}" if self.ocr_var.get() else ""),
-        )
-
-    def _pick_tess(self) -> None:
-        p = filedialog.askopenfilename(
-            title="tesseract.exe",
-            filetypes=[("tesseract", "tesseract.exe"), ("All", "*.*")],
-        )
-        if p:
-            self.tess_var.set(p)
 
     def _scan(self) -> None:
         path = Path(self.epub_var.get().strip())
@@ -849,13 +624,7 @@ class ExtractApp(ttk.Frame):
         written = 0
         parts_for_raw: list[str] = []
         for ch in chosen:
-            body = ch.body.replace("\r\n", "\n")
-            try:
-                from wn_series import strip_page_numbers
-
-                body = strip_page_numbers(body)
-            except Exception:
-                pass
+            body = strip_page_numbers(ch.body)
             dest = out / filename_for(ch, pad)
             dest.write_text(body, encoding="utf-8")
             written += 1

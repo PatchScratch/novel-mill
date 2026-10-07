@@ -4,199 +4,29 @@
 
 from __future__ import annotations
 
-import os
 import queue
-import re
 import shutil
-import subprocess
-import tempfile
 import threading
 import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-__version__ = "1.4.3"
-APP_TITLE = "OCR"
-DEFAULT_IMG = ""
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
-OCR_EXT = {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
-TESS_CANDIDATES = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-    "/usr/bin/tesseract",
-    "tesseract",
+from wn_series import (
+    IMAGE_EXT,
+    app_version,
+    find_tesseract,
+    folder_images,
+    infer_series_root,
+    ocr_image,
+    ocr_images,
+    stitch_ocr_texts,
+    tess_langs,
 )
 
-
-def find_tesseract(explicit: str = "") -> str | None:
-    if explicit:
-        p = Path(explicit)
-        if p.is_file():
-            return str(p)
-        found = shutil.which(explicit)
-        if found:
-            return found
-    for cand in TESS_CANDIDATES:
-        path = Path(cand)
-        if path.is_file():
-            return str(path)
-        found = shutil.which(cand)
-        if found:
-            return found
-    return None
-
-
-def _ascii_safe(path: Path) -> bool:
-    try:
-        str(path).encode("ascii")
-        return True
-    except UnicodeEncodeError:
-        return False
-
-
-_LANG_CACHE: dict[str, set[str]] = {}
-
-
-def tess_langs(tess: str) -> set[str]:
-    if tess in _LANG_CACHE:
-        return _LANG_CACHE[tess]
-    try:
-        proc = subprocess.run([tess, "--list-langs"], capture_output=True, timeout=15, check=False)
-    except Exception:
-        _LANG_CACHE[tess] = set()
-        return set()
-    text = (proc.stdout or proc.stderr).decode("utf-8", errors="replace")
-    langs = {ln.strip() for ln in text.splitlines() if ln.strip() and " " not in ln.strip()}
-    _LANG_CACHE[tess] = langs
-    return langs
-
-
-_JP = r"\u3040-\u30FF\u4E00-\u9FFF\uFF66-\uFF9D"
-_JP_PUNCT = r"。、！？…ー〜「」『』（）・"
-
-
-def tidy_ocr(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\u3000", " ")
-    text = re.sub(rf"(?<=[{_JP}{_JP_PUNCT}])[ \t]+(?=[{_JP}{_JP_PUNCT}])", "", text)
-    text = re.sub(rf"(?<=[{_JP}])[ \t]+(?=[A-Za-z0-9])", "", text)
-    text = re.sub(rf"(?<=[A-Za-z0-9])[ \t]+(?=[{_JP}])", "", text)
-    text = re.sub(r"[ \t]+([。、！？）」』])", r"\1", text)
-    text = re.sub(r"([「『（])[ \t]+", r"\1", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _cjk_score(text: str) -> int:
-    n = 0
-    for ch in text:
-        o = ord(ch)
-        if 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF or 0xFF66 <= o <= 0xFF9D:
-            n += 1
-    return n
-
-
-def _tess_once(tess: str, work: Path, lang: str, psm: str) -> str:
-    cmd = [tess, str(work), "stdout", "-l", lang, "--psm", psm]
-    proc = subprocess.run(cmd, capture_output=True, timeout=180, check=False)
-    out = proc.stdout.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0 and not out:
-        err = proc.stderr.decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(err or "tesseract failed")
-    return out
-
-
-def ocr_image(tess: str, image: Path, lang: str, mode: str = "auto") -> str:
-    if image.suffix.lower() not in OCR_EXT:
-        return ""
-    work = image
-    tmp: Path | None = None
-    if not _ascii_safe(image):
-        ext = image.suffix.lower() or ".jpg"
-        fd, raw = tempfile.mkstemp(prefix="wnocr_", suffix=ext)
-        os.close(fd)
-        tmp = Path(raw)
-        shutil.copyfile(image, tmp)
-        work = tmp
-    installed = tess_langs(tess)
-    attempts: list[tuple[str, str]] = []
-    if mode in ("auto", "vertical"):
-        if not installed or "jpn_vert" in installed:
-            attempts.append(("jpn_vert+jpn", "5"))
-            attempts.append(("jpn_vert", "5"))
-        attempts.append((lang, "5"))
-    if mode in ("auto", "horizontal"):
-        attempts.append((lang, "6"))
-        attempts.append((lang, "4"))
-    seen: set[tuple[str, str]] = set()
-    best = ""
-    best_score = -1
-    last_err = ""
-    try:
-        for use_lang, psm in attempts:
-            key = (use_lang, psm)
-            if key in seen:
-                continue
-            seen.add(key)
-            parts = [p for p in use_lang.split("+") if p]
-            if installed and parts and not all(p in installed or p == "osd" for p in parts):
-                continue
-            try:
-                text = _tess_once(tess, work, use_lang, psm)
-            except Exception as e:
-                last_err = str(e)
-                continue
-            score = _cjk_score(text) * 4 + len(text)
-            if score > best_score:
-                best_score = score
-                best = text
-            if mode != "auto" and text:
-                break
-            if mode == "auto" and _cjk_score(text) >= 40:
-                break
-    finally:
-        if tmp is not None:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-    if not best and last_err:
-        raise RuntimeError(f"{image.name}: {last_err}")
-    return tidy_ocr(best)
-
-
-def folder_images(folder: Path) -> list[Path]:
-    if not folder.is_dir():
-        return []
-    ocr_dir = (folder / "ocr").resolve()
-    out: list[Path] = []
-    for p in folder.rglob("*"):
-        if not p.is_file() or p.suffix.lower() not in IMAGE_EXT:
-            continue
-        try:
-            p.resolve().relative_to(ocr_dir)
-            continue
-        except ValueError:
-            out.append(p)
-    return sorted(out, key=lambda x: x.name.lower())
-
-
-def ocr_images(images: list[Path], tess: str, lang: str, dest_dir: Path) -> tuple[dict[str, Path], list[str]]:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    written: dict[str, Path] = {}
-    errors: list[str] = []
-    for img in images:
-        try:
-            text = ocr_image(tess, img, lang)
-        except Exception as e:
-            errors.append(f"{img.name}: {e}")
-            continue
-        if not text:
-            continue
-        out = dest_dir / f"{img.stem}.ocr.txt"
-        out.write_text(text + "\n", encoding="utf-8")
-        written[img.name] = out
-    return written, errors
+__version__ = app_version()
+APP_TITLE = "OCR"
+DEFAULT_IMG = ""
 
 
 class OcrApp(ttk.Frame):
@@ -222,6 +52,7 @@ class OcrApp(ttk.Frame):
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.log_q: queue.Queue[str] = queue.Queue()
+        self.ui_q: queue.Queue = queue.Queue()
         self._build()
         self.after(120, self._drain_log)
 
@@ -304,7 +135,6 @@ class OcrApp(ttk.Frame):
         self.hint_lbl = ttk.Label(
             root,
             text="Japanese folder names are copied to a temp ASCII path before Tesseract runs.",
-            foreground="#888",
         )
         self.hint_lbl.pack(anchor="w", padx=10, pady=(0, 8))
         self._ui_lang = "en"
@@ -348,29 +178,14 @@ class OcrApp(ttk.Frame):
 
     def _combine(self) -> None:
         ocr_dir = Path(self.out_var.get().strip())
-        try:
-            from wn_series import infer_series_root
-        except ImportError:
-            infer_series_root = None
         dest = None
-        if infer_series_root:
-            root = infer_series_root(ocr_dir, self.img_var.get())
-            if root is not None:
-                dest = root / "raw_full.txt"
-                self._series = root
-                self._raw = dest
+        root = infer_series_root(ocr_dir, self.img_var.get())
+        if root is not None:
+            dest = root / "raw_full.txt"
+            self._series = root
+            self._raw = dest
         if dest is None:
             dest = ocr_dir.parent / "raw_full.txt"
-        try:
-            from wn_series import stitch_ocr_texts
-        except ImportError:
-            import importlib.util
-
-            path = Path(__file__).resolve().parent / "wn_series.py"
-            spec = importlib.util.spec_from_file_location("wn_series", path)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            stitch_ocr_texts = mod.stitch_ocr_texts
         try:
             n, dest = stitch_ocr_texts(ocr_dir, Path(dest))
         except Exception as e:
@@ -451,7 +266,20 @@ class OcrApp(ttk.Frame):
     def _log(self, msg: str) -> None:
         self.log_q.put(time.strftime("%H:%M:%S ") + msg)
 
+    def _ui(self, fn) -> None:
+        """Marshal a UI update from the worker thread onto the Tk main loop."""
+        self.ui_q.put(fn)
+
     def _drain_log(self) -> None:
+        try:
+            while True:
+                fn = self.ui_q.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
         try:
             while True:
                 line = self.log_q.get_nowait()
@@ -508,13 +336,13 @@ class OcrApp(ttk.Frame):
                 if self.stop_event.is_set():
                     self._log("Stopped.")
                     break
-                self.status_var.set(f"{i}/{total}  {img.name}")
-                self.progress["value"] = i - 1
+                self._ui(lambda m=f"{i}/{total}  {img.name}": self.status_var.set(m))
+                self._ui(lambda v=i - 1: self.progress.configure(value=v))
                 out = dest / f"{img.stem}.ocr.txt"
                 if out.exists() and out.stat().st_size > 0:
                     self._log(f"SKIP {img.name} (exists {out.name})")
                     skip += 1
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     continue
                 self._log(f"OCR  {img.name}")
                 t0 = time.time()
@@ -523,7 +351,7 @@ class OcrApp(ttk.Frame):
                 except Exception as e:
                     fail += 1
                     self._log(f"FAIL {img.name}: {e}")
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     continue
                 elapsed = time.time() - t0
                 if not text:
@@ -533,13 +361,16 @@ class OcrApp(ttk.Frame):
                     out.write_text(text + "\n", encoding="utf-8")
                     ok += 1
                     self._log(f"OK   {out.name}  {len(text)} chars  {elapsed:.1f}s")
-                self.progress["value"] = i
+                self._ui(lambda v=i: self.progress.configure(value=v))
             msg = f"Done. ok={ok} skip={skip} fail={fail}"
-            self.status_var.set(msg)
+            self._ui(lambda m=msg: self.status_var.set(m))
             self._log(msg)
         finally:
-            self.run_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self._ui(lambda: self._set_running(False))
+
+    def _set_running(self, on: bool) -> None:
+        self.run_btn.configure(state="disabled" if on else "normal")
+        self.stop_btn.configure(state="normal" if on else "disabled")
 
     def mainloop(self, n: int = 0):  # type: ignore[override]
         root = self._own_root or self.winfo_toplevel()

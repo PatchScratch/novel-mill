@@ -15,9 +15,11 @@ Mill needs a running model server. OCR needs Tesseract. Neither is bundled.
 
 ## Install
 
-Unzip, then double-click `wn-local-mill.bat` (Windows) or run `python3 wn-local-mill.py` (Linux). Python 3 must be on the PATH.
+Grab the Windows exe or the Linux AppImage from the [releases](https://github.com/PatchScratch/novel-mill/releases) page. Tesseract and LM Studio are still separate installs; see Requirements.
 
-Book folders are not part of the install. Theme, language, and the scene tick list are saved under `%APPDATA%\NovelMill` (Windows) or `~/.config/novel_mill` (Linux).
+To run from source instead, unzip, then double-click `wn-local-mill.bat` (Windows) or run `python3 wn-local-mill.py` (Linux). Python 3 must be on the PATH.
+
+Book folders are not part of the install. Theme, language, the scene tick list, and the Mill connection settings (API base, model, key, temp, pause, timeout, context) are saved under `%APPDATA%\NovelMill` (Windows) or `~/.config/novel_mill` (Linux).
 
 ## Tabs
 
@@ -66,7 +68,6 @@ A volume of about 30 chapters is often 3–5 hours on an RTX 3070 with a 12B Q4 
 ## Future features
 
 - Cloud models through the OpenAI chat-completions API: ChatGPT, Grok, OpenRouter, and any other host that speaks that format. This release talks only to LM Studio on `http://127.0.0.1:1234`.
-- A Windows exe and a Linux Flatpak, so Python does not have to be installed first.
 
 ## Not this project
 

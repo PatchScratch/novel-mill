@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Novel Mill
+Exec=NovelMill
+Comment=Translate Japanese web and light novels one scene at a time
+Icon=NovelMill
+Categories=Utility;Translation;
+Terminal=false

@@ -1,0 +1,55 @@
+name: Build Linux AppImage
+
+# Builds the AppImage inside a manylinux_2_28 container (oldest glibc we
+# support) and smoke-tests the GUI under Xvfb, on every tag (v*) and on
+# demand. The result attaches to the matching GitHub release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build AppImage (manylinux_2_28 container)
+        run: |
+          mkdir -p dist
+          docker run --rm -v "$PWD:/src" quay.io/pypa/manylinux_2_28_x86_64 \
+            /src/packaging/appimage/build.sh
+
+      - name: Smoke test (headless GUI)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q \
+            xvfb libx11-6 libxft2 libxext6 libxrender1 fontconfig
+          chmod +x dist/NovelMill-x86_64.AppImage
+          xvfb-run -a timeout 40 \
+            ./dist/NovelMill-x86_64.AppImage --appimage-extract-and-run \
+            >/tmp/gui.log 2>&1 &
+          GUI=$!
+          sleep 25
+          if kill -0 $GUI 2>/dev/null; then echo "GUI OK"; kill $GUI; else
+            echo "GUI DIED"; tail -20 /tmp/gui.log; exit 1; fi
+
+      - name: Rename with version
+        run: |
+          VER="${GITHUB_REF_NAME:-dev}"
+          [ -n "$VER" ] || VER="dev"
+          mv dist/NovelMill-x86_64.AppImage "dist/NovelMill-$VER-x86_64.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist/*.AppImage
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist/*.AppImage --clobber

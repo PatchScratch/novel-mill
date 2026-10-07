@@ -1,0 +1,9 @@
+# Shell scripts and AppImage files must stay LF or the Linux build breaks.
+*.sh       text eol=lf
+AppRun     text eol=lf
+*.desktop  text eol=lf
+*.spec     text eol=lf
+*.py       text=auto
+*.json     text=auto
+*.md       text=auto
+VERSION    text eol=lf

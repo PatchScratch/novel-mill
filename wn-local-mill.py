@@ -18,40 +18,68 @@ import json
 import os
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-__version__ = "1.8.0"
+
+def app_dir() -> Path:
+    """App file root: the PyInstaller bundle when frozen, else this folder."""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def read_version() -> str:
+    """Single version source: the VERSION file shipped beside the app."""
+    try:
+        v = (app_dir() / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "0.0.0"
+    return v or "0.0.0"
+
+
+__version__ = read_version()
 APP_TITLE = "Novel Mill"
 APP_USER_MODEL_ID = "NovelMill.Desktop"
 
-# CustomTkinter / novel_downloader dark + light tokens (no white chrome).
+# Shared design language across PatchScratch projects. Base:
+# Translation-Aggregator translation_aggregator/gui/theme.py (itself the
+# novel-downloader CustomTkinter palette). Same token names, same hex values;
+# keep both files in sync. Novel-Mill-only extras: accent_hover, danger.
 THEMES = {
     "dark": {
-        "BG": "#242424",
-        "BG2": "#2b2b2b",
-        "BG3": "#333333",
-        "FG": "#e5e5e5",
-        "FG_DIM": "#a0a0a0",
-        "ACCENT": "#1f6aa5",
-        "ACCENT_HOVER": "#144870",
-        "BTN": "#3d3d3d",
-        "DANGER": "#c23b3b",
-        "ENTRY_BG": "#2e2e2e",
-        "SELECT_FG": "#ffffff",
+        "window": "#2b2b2b",
+        "pane": "#2b2b2b",
+        "text": "#dce4ee",
+        "disabled": "#6e6e6e",
+        "accent": "#1f6aa5",
+        "accent_text": "#ffffff",
+        "button": "#3a3a3a",
+        "button_hover": "#484848",
+        "input": "#242424",
+        "border": "#555555",
+        "handle": "#4a4a4a",
+        "accent_hover": "#144870",
+        "danger": "#c23b3b",
     },
     "light": {
-        "BG": "#f2f2f2",
-        "BG2": "#e8e8e8",
-        "BG3": "#dedede",
-        "FG": "#1a1a1a",
-        "FG_DIM": "#5a5a5a",
-        "ACCENT": "#1f6aa5",
-        "ACCENT_HOVER": "#144870",
-        "BTN": "#dcdcdc",
-        "DANGER": "#c23b3b",
-        "ENTRY_BG": "#ffffff",
-        "SELECT_FG": "#ffffff",
+        "window": "#fbfbfb",
+        "pane": "#ffffff",
+        "text": "#1a1a1a",
+        "disabled": "#a0a0a0",
+        "accent": "#3b8ed0",
+        "accent_text": "#ffffff",
+        "button": "#e0e0e0",
+        "button_hover": "#d0d0d0",
+        "input": "#ffffff",
+        "border": "#c0c0c0",
+        "handle": "#cccccc",
+        "accent_hover": "#2f72a6",
+        "danger": "#c23b3b",
     },
 }
 
@@ -151,65 +179,68 @@ def save_ui_settings(data: dict) -> None:
 
 def apply_theme(root: tk.Tk, mode: str) -> ttk.Style:
     pal = THEMES[resolve_theme(mode)]
-    bg, bg2, bg3 = pal["BG"], pal["BG2"], pal["BG3"]
-    fg, dim = pal["FG"], pal["FG_DIM"]
-    accent, hover = pal["ACCENT"], pal["ACCENT_HOVER"]
-    btn, danger = pal["BTN"], pal["DANGER"]
-    entry_bg = pal["ENTRY_BG"]
-    root.configure(bg=bg)
-    root.option_add("*Background", bg)
+    win, pane = pal["window"], pal["pane"]
+    fg, dim = pal["text"], pal["disabled"]
+    accent, accent_text = pal["accent"], pal["accent_text"]
+    accent_hover = pal["accent_hover"]
+    btn, btn_hover = pal["button"], pal["button_hover"]
+    border, handle = pal["border"], pal["handle"]
+    entry_bg = pal["input"]
+    root.configure(bg=win)
+    root.option_add("*Background", win)
     root.option_add("*Foreground", fg)
     root.option_add("*selectBackground", accent)
-    root.option_add("*selectForeground", pal["SELECT_FG"])
+    root.option_add("*selectForeground", accent_text)
     root.option_add("*Text.background", entry_bg)
     root.option_add("*Text.foreground", fg)
     root.option_add("*Text.insertBackground", fg)
-    root.option_add("*Text.highlightBackground", bg)
+    root.option_add("*Text.highlightBackground", win)
     root.option_add("*Listbox.background", entry_bg)
     root.option_add("*Listbox.foreground", fg)
     root.option_add("*Entry.background", entry_bg)
     root.option_add("*Entry.foreground", fg)
     root.option_add("*Entry.insertBackground", fg)
-    root.option_add("*Entry.highlightBackground", bg)
+    root.option_add("*Entry.highlightBackground", win)
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
     except tk.TclError:
         pass
-    flat = {"bordercolor": bg3, "lightcolor": bg, "darkcolor": bg, "relief": "flat"}
-    style.configure(".", background=bg, foreground=fg, fieldbackground=entry_bg, **flat)
-    style.configure("TFrame", background=bg, **flat)
-    style.configure("TLabel", background=bg, foreground=fg)
-    style.configure("TLabelframe", background=bg, foreground=fg, borderwidth=1, **flat)
-    style.configure("TLabelframe.Label", background=bg, foreground=dim)
+    flat = {"bordercolor": border, "lightcolor": win, "darkcolor": win, "relief": "flat"}
+    style.configure(".", background=win, foreground=fg, fieldbackground=entry_bg, **flat)
+    style.configure("TFrame", background=win, **flat)
+    style.configure("TLabel", background=win, foreground=fg)
+    style.configure("TLabelframe", background=win, foreground=fg, borderwidth=1, **flat)
+    style.configure("TLabelframe.Label", background=win, foreground=dim)
     style.configure("TButton", background=btn, foreground=fg, padding=6, **flat)
-    style.map("TButton", background=[("active", hover), ("disabled", bg3)], foreground=[("active", "#fff")])
-    style.configure("TCheckbutton", background=bg, foreground=fg)
-    style.configure("TRadiobutton", background=bg, foreground=fg)
+    style.map("TButton", background=[("active", btn_hover), ("disabled", btn)], foreground=[("disabled", dim)])
+    style.configure("TCheckbutton", background=win, foreground=fg)
+    style.configure("TRadiobutton", background=win, foreground=fg)
     style.configure("TEntry", fieldbackground=entry_bg, foreground=fg, insertcolor=fg, **flat)
-    style.configure("TCombobox", fieldbackground=entry_bg, foreground=fg, background=entry_bg, **flat)
+    style.configure("TCombobox", fieldbackground=entry_bg, foreground=fg, background=btn, **flat)
     style.map("TCombobox", fieldbackground=[("readonly", entry_bg)], foreground=[("readonly", fg)])
-    style.configure("TNotebook", background=bg, borderwidth=0)
-    style.configure("TNotebook.Tab", background=bg, foreground=fg, padding=0)
+    style.configure("TNotebook", background=win, borderwidth=0)
+    style.configure("TNotebook.Tab", background=win, foreground=fg, padding=0)
     style.layout("Hidden.TNotebook.Tab", [])
-    style.configure("Hidden.TNotebook", background=bg, borderwidth=0)
-    style.configure("TProgressbar", background=accent, troughcolor=bg3)
-    style.configure("TScrollbar", background=bg2, troughcolor=bg, bordercolor=bg, arrowcolor=fg)
-    style.configure("Chrome.TFrame", background=bg2)
-    style.configure("Tab.TButton", background=bg2, foreground=dim, padding=(14, 8))
-    style.map("Tab.TButton", background=[("active", bg3)], foreground=[("active", fg)])
-    style.configure("TabOn.TButton", background=bg3, foreground=fg, padding=(14, 8))
-    style.configure("Win.TButton", background=bg2, foreground=fg, width=3, padding=4)
-    style.map("Win.TButton", background=[("active", bg3)])
-    style.configure("Close.TButton", background=bg2, foreground=fg, width=3, padding=4)
-    style.map("Close.TButton", background=[("active", danger)], foreground=[("active", "#fff")])
-    style.configure("Status.TLabel", background=bg2, foreground=dim)
-    style.configure("Seg.TFrame", background=bg3)
-    style.configure("SegOff.TButton", background=bg3, foreground=dim, padding=(10, 4))
-    style.configure("SegOn.TButton", background=accent, foreground="#ffffff", padding=(10, 4))
-    style.map("SegOff.TButton", background=[("active", btn)], foreground=[("active", fg)])
-    style.map("SegOn.TButton", background=[("active", hover)])
-    _recolor_text_widgets(root, entry_bg, fg, bg)
+    style.configure("Hidden.TNotebook", background=win, borderwidth=0)
+    style.configure("TProgressbar", background=accent, troughcolor=btn)
+    style.configure("TScrollbar", background=handle, troughcolor=win, bordercolor=win, arrowcolor=fg)
+    style.configure("Chrome.TFrame", background=pane)
+    style.configure("Tab.TButton", background=pane, foreground=dim, padding=(14, 8))
+    style.map("Tab.TButton", background=[("active", btn_hover)], foreground=[("active", fg)])
+    style.configure("TabOn.TButton", background=btn, foreground=fg, padding=(14, 8))
+    style.map("TabOn.TButton", background=[("active", btn_hover)])
+    style.configure("Win.TButton", background=pane, foreground=fg, width=3, padding=4)
+    style.map("Win.TButton", background=[("active", btn_hover)])
+    style.configure("Close.TButton", background=pane, foreground=fg, width=3, padding=4)
+    style.map("Close.TButton", background=[("active", pal["danger"])], foreground=[("active", accent_text)])
+    style.configure("Status.TLabel", background=pane, foreground=dim)
+    style.configure("Seg.TFrame", background=btn)
+    style.configure("SegOff.TButton", background=btn, foreground=dim, padding=(10, 4))
+    style.configure("SegOn.TButton", background=accent, foreground=accent_text, padding=(10, 4))
+    style.map("SegOff.TButton", background=[("active", btn_hover)], foreground=[("active", fg)])
+    style.map("SegOn.TButton", background=[("active", accent_hover)])
+    _recolor_text_widgets(root, entry_bg, fg, win)
     return style
 
 
@@ -315,7 +346,7 @@ REQUIRED = (
 
 
 def _require_frame_siblings() -> None:
-    here = Path(__file__).resolve().parent
+    here = app_dir()
     stale = []
     for name, needle in REQUIRED:
         path = here / name
@@ -330,7 +361,7 @@ def _require_frame_siblings() -> None:
 
 
 def _load_sibling(mod_name: str, filename: str, need: str | None = None):
-    path = Path(__file__).resolve().parent / filename
+    path = app_dir() / filename
     if not path.is_file():
         raise SystemExit(f"Missing {path}")
     spec = importlib.util.spec_from_file_location(mod_name, path)
@@ -343,7 +374,7 @@ def _load_sibling(mod_name: str, filename: str, need: str | None = None):
         names = [n for n in dir(mod) if n[:1].isupper() or n.endswith("App")]
         raise SystemExit(
             f"{path}\nhas no {need}. Found: {names}\n"
-            "Replace this file with artifacts/wn-local-mill/wn-scene-mill.py "
+            "Replace this file with the wn-scene-mill.py from the repo "
             "(must contain class MillApp(ttk.Frame))."
         )
     return mod
@@ -362,6 +393,12 @@ def main() -> None:
     root.title(f"{APP_TITLE} {__version__}")
     root.geometry("1100x780")
     root.minsize(900, 620)
+    # Shared design language: 10 pt base font (TA QSS "font-size: 10pt").
+    for fname in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        try:
+            tkfont.nametofont(fname).configure(size=10)
+        except Exception:
+            pass
     apply_theme(root, ui["appearance"])
     root.overrideredirect(True)
 

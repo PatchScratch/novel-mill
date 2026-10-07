@@ -9,14 +9,15 @@ Lock files (prompt.txt, glossary.txt, voices.txt) are concatenated into
 the system message. Missing lock → FALLBACK_SYSTEM.
 
 Pause (default 10 s) sits between POSTs so a 3070-class GPU can flush.
+
+Connection settings (API base, model, key, temp, timeout, pause,
+context, overwrite) persist to mill.json next to queues.json.
 """
 from __future__ import annotations
 
 import json
-import os
 import queue
 import re
-import sys
 import threading
 import time
 import tkinter as tk
@@ -25,7 +26,17 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-__version__ = "1.5.2"
+from wn_series import (
+    app_version,
+    config_dir,
+    nat_key,
+    read_text,
+    strip_page_numbers,
+    stitch_en_texts,
+    write_text,
+)
+
+__version__ = app_version()
 APP_TITLE = "Mill"
 DEFAULT_BASE = ""
 DEFAULT_API = "http://127.0.0.1:1234/v1"
@@ -50,26 +61,14 @@ FALLBACK_SYSTEM = (
 )
 
 
-def read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig")
-
-
-def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def build_system(lock_dir: Path) -> str:
+def build_system(lock_dir: Path | None) -> str:
     parts = []
-    for name in ("prompt.txt", "glossary.txt", "voices.txt"):
-        p = lock_dir / name
-        if p.is_file():
-            parts.append(f"## {name}\n{read_text(p).strip()}")
+    if lock_dir is not None:
+        for name in ("prompt.txt", "glossary.txt", "voices.txt"):
+            p = lock_dir / name
+            if p.is_file():
+                parts.append(f"## {name}\n{read_text(p).strip()}")
     return "\n\n".join(parts) if parts else FALLBACK_SYSTEM
-
-
-def _nat_key(path: Path):
-    return [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", path.name.lower())]
 
 
 def scene_files(in_dir: Path) -> list[Path]:
@@ -82,7 +81,7 @@ def scene_files(in_dir: Path) -> list[Path]:
         if SKIP_NAME.search(p.stem):
             continue
         files.append(p)
-    return sorted(files, key=_nat_key)
+    return sorted(files, key=nat_key)
 
 
 def out_path_for(src: Path, out_dir: Path) -> Path:
@@ -91,11 +90,50 @@ def out_path_for(src: Path, out_dir: Path) -> Path:
 
 def queue_store_path() -> Path:
     """Local only. Not written into the repo or the book folder."""
-    if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA") or Path.home()) / "NovelMill"
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "novel_mill"
-    return base / "queues.json"
+    return config_dir() / "queues.json"
+
+
+def mill_settings_path() -> Path:
+    """Local only. Connection settings survive restarts."""
+    return config_dir() / "mill.json"
+
+
+def load_mill_settings() -> dict:
+    """Validated values for the setting vars; junk drops out, not in."""
+    try:
+        raw = json.loads(mill_settings_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+    for key in ("api", "key", "model"):
+        v = raw.get(key)
+        if isinstance(v, str) and v.strip():
+            out[key] = v
+    for key in ("temp", "pause"):
+        try:
+            float(raw.get(key))
+            out[key] = str(raw[key])
+        except (TypeError, ValueError):
+            pass
+    for key in ("timeout", "ctx"):
+        try:
+            out[key] = str(int(raw.get(key)))
+        except (TypeError, ValueError):
+            pass
+    if isinstance(raw.get("overwrite"), bool):
+        out["overwrite"] = raw["overwrite"]
+    return out
+
+
+def save_mill_settings(data: dict) -> None:
+    path = mill_settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def post_chat(api_base, api_key, model, system, user, temperature, timeout, max_tokens=None) -> str:
@@ -147,18 +185,25 @@ class MillApp(ttk.Frame):
         self.stop_event = threading.Event()
         self.worker = None
         self.log_q = queue.Queue()
+        self.ui_q: queue.Queue = queue.Queue()
         self.series_var = tk.StringVar(value="")
         self.in_var = tk.StringVar(value="")
         self.out_var = tk.StringVar(value="")
         self.lock_var = tk.StringVar(value="")
-        self.api_var = tk.StringVar(value=DEFAULT_API)
-        self.model_var = tk.StringVar(value=DEFAULT_MODEL)
-        self.key_var = tk.StringVar(value=DEFAULT_KEY)
-        self.temp_var = tk.StringVar(value="0.1")
-        self.timeout_var = tk.StringVar(value="1200")
-        self.pause_var = tk.StringVar(value="10")
-        self.ctx_var = tk.StringVar(value="8192")
-        self.overwrite_var = tk.BooleanVar(value=False)
+        saved = load_mill_settings()
+        self.api_var = tk.StringVar(value=saved.get("api") or DEFAULT_API)
+        self.model_var = tk.StringVar(value=saved.get("model") or DEFAULT_MODEL)
+        self.key_var = tk.StringVar(value=saved.get("key") or DEFAULT_KEY)
+        self.temp_var = tk.StringVar(value=saved.get("temp") or "0.1")
+        self.timeout_var = tk.StringVar(value=saved.get("timeout") or "1200")
+        self.pause_var = tk.StringVar(value=saved.get("pause") or "10")
+        self.ctx_var = tk.StringVar(value=saved.get("ctx") or "8192")
+        self.overwrite_var = tk.BooleanVar(value=saved.get("overwrite", False))
+        for var in (
+            self.api_var, self.key_var, self.model_var, self.temp_var,
+            self.timeout_var, self.pause_var, self.ctx_var, self.overwrite_var,
+        ):
+            var.trace_add("write", lambda *_: self._save_mill_settings())
         self.status_var = tk.StringVar(value="Idle. LM Studio server must be running.")
         self._build()
         self.after(120, self._drain_log)
@@ -192,9 +237,9 @@ class MillApp(ttk.Frame):
         ttk.Label(api, text="Key").grid(row=1, column=0, sticky="w", padx=6, pady=3)
         ttk.Entry(api, textvariable=self.key_var, width=16).grid(row=1, column=1, sticky="w")
         ttk.Label(api, text="Temp").grid(row=1, column=2, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.temp_var, width=8).grid(row=1, column=3, sticky="w")
-        ttk.Label(api, text="Timeout s").grid(row=1, column=3, sticky="e", padx=(80, 4))
-        ttk.Entry(api, textvariable=self.timeout_var, width=8).grid(row=1, column=3, sticky="e")
+        ttk.Entry(api, textvariable=self.temp_var, width=8).grid(row=1, column=3, sticky="ew")
+        ttk.Label(api, text="Timeout s").grid(row=1, column=4, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.timeout_var, width=8).grid(row=1, column=5, sticky="w")
         ttk.Label(api, text="Context").grid(row=2, column=0, sticky="w", padx=6, pady=3)
         ttk.Entry(api, textvariable=self.ctx_var, width=8).grid(row=2, column=1, sticky="w")
         ttk.Label(api, text="Pause s").grid(row=2, column=2, sticky="w", padx=6)
@@ -310,6 +355,20 @@ class MillApp(ttk.Frame):
         except Exception:
             pass
 
+    def _save_mill_settings(self) -> None:
+        save_mill_settings(
+            {
+                "api": self.api_var.get().strip(),
+                "key": self.key_var.get().strip(),
+                "model": self.model_var.get().strip(),
+                "temp": self.temp_var.get().strip(),
+                "timeout": self.timeout_var.get().strip(),
+                "pause": self.pause_var.get().strip(),
+                "ctx": self.ctx_var.get().strip(),
+                "overwrite": bool(self.overwrite_var.get()),
+            }
+        )
+
     def _refresh_scenes(self, keep: bool = True) -> None:
         in_dir = Path(self.in_var.get().strip()) if self.in_var.get().strip() else None
         self.scene_list.delete(0, "end")
@@ -342,6 +401,9 @@ class MillApp(ttk.Frame):
     def _toggle_scene(self, event) -> str:
         idx = self.scene_list.nearest(event.y)
         if idx < 0 or idx >= len(self._scenes):
+            return "break"
+        bbox = self.scene_list.bbox(idx)
+        if not bbox or not (bbox[1] <= event.y <= bbox[1] + bbox[3]):
             return "break"
         name = self._scenes[idx].name
         if name in self._picked:
@@ -417,8 +479,6 @@ class MillApp(ttk.Frame):
         series = Path(self.series_var.get().strip() or out_dir.parent)
         dest = series / "english_full.txt"
         try:
-            from wn_series import stitch_en_texts
-
             n, dest = stitch_en_texts(out_dir, dest)
         except Exception as e:
             messagebox.showerror(APP_TITLE, str(e))
@@ -434,7 +494,13 @@ class MillApp(ttk.Frame):
     def _start(self) -> None:
         if self.worker and self.worker.is_alive():
             return
-        in_dir = Path(self.in_var.get())
+        in_txt = self.in_var.get().strip()
+        out_txt = self.out_var.get().strip()
+        lock_txt = self.lock_var.get().strip()
+        if not in_txt or not out_txt:
+            messagebox.showerror(APP_TITLE, "Scenes (in) and English (out) folders are both required.")
+            return
+        in_dir = Path(in_txt)
         if not in_dir.is_dir():
             messagebox.showerror(APP_TITLE, f"Input folder missing:\n{in_dir}")
             return
@@ -451,16 +517,15 @@ class MillApp(ttk.Frame):
             messagebox.showerror(APP_TITLE, "Temp, timeout, pause, and context must be numbers.")
             return
         self.stop_event.clear()
-        self.start_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
+        self._set_running(True)
         self.progress["value"] = 0
         self.progress["maximum"] = len(files)
         self.worker = threading.Thread(
             target=self._run_queue,
             args=(
                 files,
-                Path(self.out_var.get()),
-                Path(self.lock_var.get()),
+                Path(out_txt),
+                Path(lock_txt) if lock_txt else None,
                 self.api_var.get().strip(),
                 self.key_var.get().strip() or DEFAULT_KEY,
                 self.model_var.get().strip(),
@@ -474,6 +539,10 @@ class MillApp(ttk.Frame):
         )
         self.worker.start()
 
+    def _set_running(self, on: bool) -> None:
+        self.start_btn.configure(state="disabled" if on else "normal")
+        self.stop_btn.configure(state="normal" if on else "disabled")
+
     def _stop(self) -> None:
         self.stop_event.set()
         self.status_var.set("Stopping after current file…")
@@ -483,7 +552,7 @@ class MillApp(ttk.Frame):
         try:
             system = build_system(lock_dir)
             self._log(f"Mill {__version__}  timeout={timeout}s pause={pause}s ctx={ctx}")
-            self._log(f"System prompt {len(system)} chars from {lock_dir}")
+            self._log(f"System prompt {len(system)} chars from {lock_dir or '(no lock folder)'}")
             done = skip = fail = 0
             streak = 0
             total = len(files)
@@ -492,30 +561,34 @@ class MillApp(ttk.Frame):
                     self._log("Stopped.")
                     break
                 dest = out_path_for(src, out_dir)
-                self.status_var.set(f"{i}/{total}  {src.name}")
+                self._ui(lambda m=f"{i}/{total}  {src.name}": self.status_var.set(m))
                 if dest.exists() and not overwrite:
                     self._log(f"SKIP {src.name} (exists {dest.name})")
                     skip += 1
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     continue
-                jp = read_text(src).strip()
                 try:
-                    from wn_series import strip_page_numbers
-                    jp = strip_page_numbers(jp).strip()
-                except Exception:
-                    pass
+                    jp = strip_page_numbers(read_text(src)).strip()
+                except Exception as e:
+                    self._log(f"SKIP {src.name} (unreadable: {e})")
+                    skip += 1
+                    self._ui(lambda v=i: self.progress.configure(value=v))
+                    continue
                 if not jp:
                     self._log(f"SKIP {src.name} (empty)")
                     skip += 1
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     continue
                 if len(jp) < MIN_SCENE_CHARS:
                     self._log(f"SKIP {src.name} ({len(jp)} chars, stub)")
                     skip += 1
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     continue
                 user = USER_PREFIX + jp + USER_SUFFIX
-                prompt_est = max(1, (len(system) + len(user)) // 2)
+                # Japanese ≈ 1 token/char, ASCII ≈ 4 chars/token. Underestimating
+                # here makes max_tokens overshoot the loaded context.
+                wide = sum(1 for ch in user if ord(ch) >= 0x2E80)
+                prompt_est = max(1, round(wide * 1.1 + (len(user) - wide) * 0.3 + len(system) * 0.3))
                 max_tok = max(128, ctx - prompt_est)
                 self._log(f"SEND {src.name}  ({len(jp)} chars ~{prompt_est} tok, max_out={max_tok})")
                 t0 = time.time()
@@ -526,7 +599,14 @@ class MillApp(ttk.Frame):
                 except Exception as e:
                     err = str(e)
                     low = err.lower()
-                    if "timed out" in low or "channel" in low or "fetch failed" in low:
+                    if "exceeds" in low and "context" in low:
+                        # Estimate was optimistic; one retry with a minimal output budget.
+                        try:
+                            en = post_chat(api, key, model, system, user, temp, timeout, 256)
+                            err = ""
+                        except Exception:
+                            pass
+                    elif any(k in low for k in ("timed out", "channel", "fetch failed", "cannot reach", "refused")):
                         self._log(f"{src.name}: {err.split(':')[0]}. Cool 45s then retry once")
                         self._pause(45)
                         if self.stop_event.is_set():
@@ -544,7 +624,7 @@ class MillApp(ttk.Frame):
                     self._log(f"FAIL {src.name}: {err}")
                     if "exceeds" in err.lower() and "context" in err.lower():
                         self._log("Context overflow. Split this scene smaller.")
-                    self.progress["value"] = i
+                    self._ui(lambda v=i: self.progress.configure(value=v))
                     if streak >= 3:
                         self._log("Three LMS faults in a row. Stopping so the GPU can recover.")
                         break
@@ -557,14 +637,14 @@ class MillApp(ttk.Frame):
                 write_text(dest, en + "\n")
                 done += 1
                 self._log(f"OK   {dest.name}  {len(en)} chars  {time.time() - t0:.1f}s")
-                self.progress["value"] = i
+                self._ui(lambda v=i: self.progress.configure(value=v))
                 self._pause(pause)
-            self.status_var.set(f"Done. ok={done} skip={skip} fail={fail}")
-            self._log(self.status_var.get())
-            self.after(0, self._refresh_scenes)
+            msg = f"Done. ok={done} skip={skip} fail={fail}"
+            self._ui(lambda m=msg: self.status_var.set(m))
+            self._log(msg)
+            self._ui(self._refresh_scenes)
         finally:
-            self.start_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self._ui(lambda: self._set_running(False))
 
     def _pause(self, seconds: float) -> None:
         if seconds <= 0:
@@ -579,7 +659,20 @@ class MillApp(ttk.Frame):
     def _log(self, msg: str) -> None:
         self.log_q.put(time.strftime("%H:%M:%S ") + msg)
 
+    def _ui(self, fn) -> None:
+        """Marshal a UI update from the worker thread onto the Tk main loop."""
+        self.ui_q.put(fn)
+
     def _drain_log(self) -> None:
+        try:
+            while True:
+                fn = self.ui_q.get_nowait()
+                try:
+                    fn()
+                except Exception:
+                    pass
+        except queue.Empty:
+            pass
         try:
             while True:
                 line = self.log_q.get_nowait()

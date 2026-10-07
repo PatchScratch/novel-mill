@@ -7,19 +7,34 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tkinter as tk
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+from wn_series import app_version, config_dir, read_text, safe_stem, strip_page_numbers, write_text
 
 APP_TITLE = "Split"
 DEFAULT_RAW = ""
 DEFAULT_OUT = ""
 
 MAX_HEADING_LEN = 80
-__version__ = "1.0.0"
+__version__ = app_version()
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_RULES_PATH = SCRIPT_DIR / "wn-raw-split.rules.json"
+if getattr(sys, "frozen", False):
+    # Inside a PyInstaller bundle the shipped rules file is read-only;
+    # edits go to a seeded copy in the user config dir.
+    DEFAULT_RULES_PATH = config_dir() / "wn-raw-split.rules.json"
+    _bundled_rules = SCRIPT_DIR / "wn-raw-split.rules.json"
+    if not DEFAULT_RULES_PATH.is_file() and _bundled_rules.is_file():
+        try:
+            DEFAULT_RULES_PATH.parent.mkdir(parents=True, exist_ok=True)
+            DEFAULT_RULES_PATH.write_bytes(_bundled_rules.read_bytes())
+        except OSError:
+            pass
+else:
+    DEFAULT_RULES_PATH = SCRIPT_DIR / "wn-raw-split.rules.json"
 
 
 @dataclass
@@ -126,8 +141,6 @@ RE_NAMED = re.compile(
     re.I,
 )
 
-ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
 # Auto prefers real chapter families over decorative breaks.
 AUTO_PRIORITY = [
     "ocr_page",
@@ -215,65 +228,6 @@ def collect_user_rule(lines: list[str], rule: UserRule) -> list[tuple[int, str]]
         if cre.search(target):
             out.append((i, line.strip() or f"part_{len(out)+1}"))
     return out
-
-
-def _cjk_count(text: str) -> int:
-    n = 0
-    for ch in text:
-        o = ord(ch)
-        if 0x3040 <= o <= 0x30FF or 0x4E00 <= o <= 0x9FFF:
-            n += 1
-    return n
-
-
-def read_text(path: Path) -> str:
-    data = path.read_bytes()
-    if not data:
-        raise ValueError(f"{path.name} is empty.")
-    if data.startswith(b"\xff\xfe") or data.startswith(b"\xfe\xff"):
-        text = data.decode("utf-16")
-    elif len(data) >= 4 and data[1:4:2] == b"\x00\x00" and data[0] != 0:
-        text = data.decode("utf-16-le")
-    else:
-        text = None
-        for enc in ("utf-8-sig", "utf-8", "cp932", "shift_jis", "gb18030"):
-            try:
-                cand = data.decode(enc)
-            except UnicodeDecodeError:
-                continue
-            if cand.count("\ufffd") > 8:
-                continue
-            text = cand
-            break
-        if text is None:
-            raise ValueError(
-                f"{path.name} is not UTF-8 / UTF-16 / CP932 text.\n"
-                "In Notepad: Save As → Encoding UTF-8. Do not split a binary file."
-            )
-    if text.count("\ufffd") > 20 or (len(text) > 200 and _cjk_count(text) < 8 and "\x00" in text):
-        raise ValueError(
-            f"{path.name} looks like broken encoding or binary.\n"
-            "Re-save raw_full.txt as UTF-8 and delete the old in\\ files."
-        )
-    return text
-
-
-def write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text.replace("\r\n", "\n").replace("\r", "\n"), encoding="utf-8")
-
-
-def safe_stem(text: str, fallback: str) -> str:
-    t = text.strip()
-    t = re.sub(r"［＃.*?］", "", t)
-    t = re.sub(r"<[^>]+>", "", t)
-    t = t.replace("《", "").replace("》", "")
-    t = re.sub(r"\s+", "_", t)
-    t = ILLEGAL.sub("", t)
-    t = t.strip("._ ")
-    if len(t) > 42:
-        t = t[:42].rstrip("._ ")
-    return t or fallback
 
 
 def lines_of(raw: str) -> list[str]:
@@ -481,17 +435,8 @@ def filename_for(part: Split, pad: int) -> str:
     return f"{part.index:0{pad}d}_{safe_stem(part.title, f'part_{part.index}')}.txt"
 
 
-def _strip_pages(text: str) -> str:
-    try:
-        from wn_series import strip_page_numbers
-        return strip_page_numbers(text)
-    except Exception:
-        text = RE_OCR_PAGE.sub("", text)
-        return text
-
-
 def strip_markup(text: str) -> str:
-    text = _strip_pages(text)
+    text = strip_page_numbers(text)
     text = HEADING_START.sub("", text)
     text = HEADING_END.sub("", text)
     text = RE_PAGE.sub("", text)
@@ -613,7 +558,6 @@ class SplitApp(ttk.Frame):
         self.hint_lbl = ttk.Label(
             root,
             text="Add splitters in wn-raw-split.rules.json (id, label, pattern).",
-            foreground="#888",
         )
         self.hint_lbl.pack(anchor="w", padx=10, pady=(0, 8))
         self._ui_lang = "en"
