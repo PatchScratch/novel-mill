@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 — 2026-10-23
 
 - Mill: Provider presets (LM Studio, OpenAI, OpenRouter, xAI Grok, Custom) for OpenAI-compatible `/v1/chat/completions` hosts; cloud bases require a real API key; HTTP 429 gets a cool-down retry; LM Studio–only wording removed from status and fault messages.
 
