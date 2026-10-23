@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Mill: Provider presets (LM Studio, OpenAI, OpenRouter, xAI Grok, Custom) for OpenAI-compatible `/v1/chat/completions` hosts; cloud bases require a real API key; HTTP 429 gets a cool-down retry; LM Studio–only wording removed from status and fault messages.
+
 ## 1.9.0 — 2026-10-07
 
 - Packaging: `build_windows.spec` (onefile exe) and `build_linux.spec` + `packaging/appimage/` (AppImage) with tag-driven GitHub Actions building and attaching both to releases. The launcher resolves its tab modules inside a PyInstaller bundle, the splitter keeps user rules in the config dir when frozen, and `VERSION` is now the single version source for every module.

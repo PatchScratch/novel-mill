@@ -2,15 +2,16 @@
 """
 Novel Mill — Mill tab.
 
-One Japanese scene file = one HTTP POST to LM Studio
-(/v1/chat/completions). No chat history. No RAG. No second server.
+One Japanese scene file = one HTTP POST to an OpenAI-compatible
+/v1/chat/completions endpoint (LM Studio, OpenAI, OpenRouter, xAI, or
+any host that speaks that format). No chat history. No RAG.
 
 Lock files (prompt.txt, glossary.txt, voices.txt) are concatenated into
 the system message. Missing lock → FALLBACK_SYSTEM.
 
-Pause (default 10 s) sits between POSTs so a 3070-class GPU can flush.
+Pause (default 10 s) sits between POSTs (local GPU flush or cloud rate limits).
 
-Connection settings (API base, model, key, temp, timeout, pause,
+Connection settings (provider, API base, model, key, temp, timeout, pause,
 context, overwrite) persist to mill.json next to queues.json.
 """
 from __future__ import annotations
@@ -24,6 +25,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from wn_series import (
@@ -42,6 +44,16 @@ DEFAULT_BASE = ""
 DEFAULT_API = "http://127.0.0.1:1234/v1"
 DEFAULT_MODEL = "google/gemma-4-12b-it"
 DEFAULT_KEY = "sk-xxx"
+# Preset id → API base and sample model. Custom leaves base alone.
+PROVIDERS: dict[str, dict[str, str | None]] = {
+    "LM Studio": {"api": DEFAULT_API, "model": DEFAULT_MODEL},
+    "OpenAI": {"api": "https://api.openai.com/v1", "model": "gpt-4o-mini"},
+    "OpenRouter": {"api": "https://openrouter.ai/api/v1", "model": "openai/gpt-4o-mini"},
+    "xAI Grok": {"api": "https://api.x.ai/v1", "model": "grok-2-latest"},
+    "Custom": {"api": None, "model": None},
+}
+PROVIDER_NAMES = tuple(PROVIDERS.keys())
+SAMPLE_MODELS = {p["model"] for p in PROVIDERS.values() if p.get("model")}
 USER_PREFIX = (
     "Output the English translation of the following Japanese. "
     "No synopsis, no bullet points, no advice, no Japanese.\n\n<<<\n"
@@ -98,6 +110,27 @@ def mill_settings_path() -> Path:
     return config_dir() / "mill.json"
 
 
+def infer_provider(api: str, saved: str | None = None) -> str:
+    """Resolve provider from saved id, else match a known API base, else Custom."""
+    if saved and saved in PROVIDERS:
+        return saved
+    base = (api or "").rstrip("/")
+    for name, preset in PROVIDERS.items():
+        preset_api = preset.get("api")
+        if preset_api and base == str(preset_api).rstrip("/"):
+            return name
+    return "Custom"
+
+
+def is_local_api(api: str) -> bool:
+    """True for loopback hosts (placeholder key is allowed)."""
+    try:
+        host = (urlparse(api).hostname or "").lower()
+    except Exception:
+        host = ""
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def load_mill_settings() -> dict:
     """Validated values for the setting vars; junk drops out, not in."""
     try:
@@ -107,10 +140,12 @@ def load_mill_settings() -> dict:
     if not isinstance(raw, dict):
         return {}
     out: dict = {}
-    for key in ("api", "key", "model"):
+    for key in ("api", "key", "model", "provider"):
         v = raw.get(key)
         if isinstance(v, str) and v.strip():
-            out[key] = v
+            if key == "provider" and v.strip() not in PROVIDERS:
+                continue
+            out[key] = v.strip()
     for key in ("temp", "pause"):
         try:
             float(raw.get(key))
@@ -161,7 +196,7 @@ def post_chat(api_base, api_key, model, system, user, temperature, timeout, max_
     except HTTPError as e:
         raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:800]}") from e
     except URLError as e:
-        raise RuntimeError(f"Cannot reach LM Studio at {url}. ({e})") from e
+        raise RuntimeError(f"Cannot reach API at {url}. ({e})") from e
     if "error" in payload:
         raise RuntimeError(str(payload["error"]))
     choices = payload.get("choices") or []
@@ -191,7 +226,8 @@ class MillApp(ttk.Frame):
         self.out_var = tk.StringVar(value="")
         self.lock_var = tk.StringVar(value="")
         saved = load_mill_settings()
-        self.api_var = tk.StringVar(value=saved.get("api") or DEFAULT_API)
+        api0 = saved.get("api") or DEFAULT_API
+        self.api_var = tk.StringVar(value=api0)
         self.model_var = tk.StringVar(value=saved.get("model") or DEFAULT_MODEL)
         self.key_var = tk.StringVar(value=saved.get("key") or DEFAULT_KEY)
         self.temp_var = tk.StringVar(value=saved.get("temp") or "0.1")
@@ -199,12 +235,15 @@ class MillApp(ttk.Frame):
         self.pause_var = tk.StringVar(value=saved.get("pause") or "10")
         self.ctx_var = tk.StringVar(value=saved.get("ctx") or "8192")
         self.overwrite_var = tk.BooleanVar(value=saved.get("overwrite", False))
+        self.provider_var = tk.StringVar(value=infer_provider(api0, saved.get("provider")))
+        self._applying_preset = False
         for var in (
             self.api_var, self.key_var, self.model_var, self.temp_var,
             self.timeout_var, self.pause_var, self.ctx_var, self.overwrite_var,
+            self.provider_var,
         ):
             var.trace_add("write", lambda *_: self._save_mill_settings())
-        self.status_var = tk.StringVar(value="Idle. LM Studio server must be running.")
+        self.status_var = tk.StringVar(value="Idle. Ping API to verify connection.")
         self._build()
         self.after(120, self._drain_log)
         if self._own_root is not None:
@@ -228,26 +267,42 @@ class MillApp(ttk.Frame):
         self._row_dir(paths, 1, "Scenes (in)", self.in_var, lambda: self._pick_dir(self.in_var))
         self._row_dir(paths, 2, "English (out)", self.out_var, lambda: self._pick_dir(self.out_var))
         self._row_dir(paths, 3, "Lock files", self.lock_var, lambda: self._pick_dir(self.lock_var))
-        api = ttk.LabelFrame(frm, text="LM Studio")
+        self.api_fr = ttk.LabelFrame(frm, text="API")
+        api = self.api_fr
         api.pack(fill="x", **pad)
-        ttk.Label(api, text="API base").grid(row=0, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(api, textvariable=self.api_var).grid(row=0, column=1, sticky="ew")
-        ttk.Label(api, text="Model").grid(row=0, column=2, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.model_var).grid(row=0, column=3, sticky="ew")
-        ttk.Label(api, text="Key").grid(row=1, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(api, textvariable=self.key_var, width=16).grid(row=1, column=1, sticky="w")
-        ttk.Label(api, text="Temp").grid(row=1, column=2, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.temp_var, width=8).grid(row=1, column=3, sticky="ew")
-        ttk.Label(api, text="Timeout s").grid(row=1, column=4, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.timeout_var, width=8).grid(row=1, column=5, sticky="w")
-        ttk.Label(api, text="Context").grid(row=2, column=0, sticky="w", padx=6, pady=3)
-        ttk.Entry(api, textvariable=self.ctx_var, width=8).grid(row=2, column=1, sticky="w")
-        ttk.Label(api, text="Pause s").grid(row=2, column=2, sticky="w", padx=6)
-        ttk.Entry(api, textvariable=self.pause_var, width=8).grid(row=2, column=3, sticky="w")
+        self.lbl_provider = ttk.Label(api, text="Provider")
+        self.lbl_provider.grid(row=0, column=0, sticky="w", padx=6, pady=3)
+        self.provider_combo = ttk.Combobox(
+            api, textvariable=self.provider_var, values=PROVIDER_NAMES,
+            state="readonly", width=14,
+        )
+        self.provider_combo.grid(row=0, column=1, sticky="w")
+        self.provider_combo.bind("<<ComboboxSelected>>", self._on_provider_change)
+        self.lbl_api = ttk.Label(api, text="API base")
+        self.lbl_api.grid(row=0, column=2, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.api_var).grid(row=0, column=3, columnspan=3, sticky="ew")
+        self.lbl_model = ttk.Label(api, text="Model")
+        self.lbl_model.grid(row=1, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(api, textvariable=self.model_var).grid(row=1, column=1, columnspan=3, sticky="ew")
+        self.lbl_key = ttk.Label(api, text="Key")
+        self.lbl_key.grid(row=1, column=4, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.key_var, width=16).grid(row=1, column=5, sticky="ew")
+        self.lbl_temp = ttk.Label(api, text="Temp")
+        self.lbl_temp.grid(row=2, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(api, textvariable=self.temp_var, width=8).grid(row=2, column=1, sticky="w")
+        self.lbl_timeout = ttk.Label(api, text="Timeout s")
+        self.lbl_timeout.grid(row=2, column=2, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.timeout_var, width=8).grid(row=2, column=3, sticky="w")
+        self.lbl_ctx = ttk.Label(api, text="Context")
+        self.lbl_ctx.grid(row=2, column=4, sticky="w", padx=6)
+        ttk.Entry(api, textvariable=self.ctx_var, width=8).grid(row=2, column=5, sticky="w")
+        self.lbl_pause = ttk.Label(api, text="Pause s")
+        self.lbl_pause.grid(row=3, column=0, sticky="w", padx=6, pady=3)
+        ttk.Entry(api, textvariable=self.pause_var, width=8).grid(row=3, column=1, sticky="w")
         self.overwrite_lbl = ttk.Label(api, text="Existing .en.txt")
-        self.overwrite_lbl.grid(row=3, column=0, sticky="w", padx=6, pady=3)
+        self.overwrite_lbl.grid(row=3, column=2, sticky="w", padx=6, pady=3)
         ow = ttk.Frame(api, style="Seg.TFrame")
-        ow.grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=3)
+        ow.grid(row=3, column=3, columnspan=3, sticky="w", padx=6, pady=3)
         self._ow_keep = ttk.Button(ow, text="Keep existing", style="SegOn.TButton", command=lambda: self._set_overwrite(False))
         self._ow_over = ttk.Button(ow, text="Overwrite", style="SegOff.TButton", command=lambda: self._set_overwrite(True))
         self._ow_keep.pack(side="left", padx=1, pady=1)
@@ -256,6 +311,7 @@ class MillApp(ttk.Frame):
         self._paint_overwrite()
         api.columnconfigure(1, weight=1)
         api.columnconfigure(3, weight=1)
+        api.columnconfigure(5, weight=1)
         btns = ttk.Frame(frm)
         btns.pack(fill="x", **pad)
         self.start_btn = ttk.Button(btns, text="Start selected", command=self._start)
@@ -310,21 +366,55 @@ class MillApp(ttk.Frame):
 
     def set_ui_lang(self, lang: str) -> None:
         self._ui_lang = "en" if lang == "en" else "ja"
-        if self._ui_lang == "ja":
+        ja = self._ui_lang == "ja"
+        if ja:
             self.overwrite_lbl.configure(text="既存の .en.txt")
             self._ow_keep.configure(text="既存を残す")
             self._ow_over.configure(text="上書きする")
+            self.lbl_provider.configure(text="プロバイダ")
+            self.lbl_api.configure(text="API ベース")
+            self.lbl_model.configure(text="モデル")
+            self.lbl_key.configure(text="キー")
+            self.lbl_temp.configure(text="温度")
+            self.lbl_timeout.configure(text="タイムアウト秒")
+            self.lbl_ctx.configure(text="コンテキスト")
+            self.lbl_pause.configure(text="休止秒")
         else:
             self.overwrite_lbl.configure(text="Existing .en.txt")
             self._ow_keep.configure(text="Keep existing")
             self._ow_over.configure(text="Overwrite")
-        ja = self._ui_lang == "ja"
+            self.lbl_provider.configure(text="Provider")
+            self.lbl_api.configure(text="API base")
+            self.lbl_model.configure(text="Model")
+            self.lbl_key.configure(text="Key")
+            self.lbl_temp.configure(text="Temp")
+            self.lbl_timeout.configure(text="Timeout s")
+            self.lbl_ctx.configure(text="Context")
+            self.lbl_pause.configure(text="Pause s")
+        self.api_fr.configure(text="API")
         self.pick_fr.configure(text="ミルするシーン" if ja else "Scenes to mill")
         self.btn_refresh.configure(text="再読込" if ja else "Refresh")
         self.btn_missing.configure(text="未完了のみ" if ja else "Missing only")
         self.btn_all.configure(text="全部" if ja else "All")
         self.btn_none.configure(text="解除" if ja else "None")
         self.start_btn.configure(text="選択を開始" if ja else "Start selected")
+
+    def _on_provider_change(self, _event=None) -> None:
+        """Fill API base (and sample model if blank/still a preset sample)."""
+        name = self.provider_var.get()
+        preset = PROVIDERS.get(name) or PROVIDERS["Custom"]
+        self._applying_preset = True
+        try:
+            if preset.get("api") is not None:
+                self.api_var.set(str(preset["api"]))
+            sample = preset.get("model")
+            if sample:
+                current = self.model_var.get().strip()
+                if not current or current in SAMPLE_MODELS:
+                    self.model_var.set(str(sample))
+        finally:
+            self._applying_preset = False
+        self._save_mill_settings()
 
     def _load_saved_pick(self, in_dir: Path) -> set[str] | None:
         try:
@@ -356,8 +446,11 @@ class MillApp(ttk.Frame):
             pass
 
     def _save_mill_settings(self) -> None:
+        if getattr(self, "_applying_preset", False):
+            return
         save_mill_settings(
             {
+                "provider": self.provider_var.get().strip() or "Custom",
                 "api": self.api_var.get().strip(),
                 "key": self.key_var.get().strip(),
                 "model": self.model_var.get().strip(),
@@ -516,6 +609,18 @@ class MillApp(ttk.Frame):
         except ValueError:
             messagebox.showerror(APP_TITLE, "Temp, timeout, pause, and context must be numbers.")
             return
+        api = self.api_var.get().strip()
+        key = self.key_var.get().strip() or DEFAULT_KEY
+        if not is_local_api(api) and (not key or key == DEFAULT_KEY):
+            messagebox.showerror(
+                APP_TITLE,
+                "Cloud API needs a real API key.\nPaste your key in the Key field (not sk-xxx).",
+            )
+            return
+        model = self.model_var.get().strip()
+        if not api or not model:
+            messagebox.showerror(APP_TITLE, "API base and Model are both required.")
+            return
         self.stop_event.clear()
         self._set_running(True)
         self.progress["value"] = 0
@@ -526,9 +631,9 @@ class MillApp(ttk.Frame):
                 files,
                 Path(out_txt),
                 Path(lock_txt) if lock_txt else None,
-                self.api_var.get().strip(),
-                self.key_var.get().strip() or DEFAULT_KEY,
-                self.model_var.get().strip(),
+                api,
+                key,
+                model,
                 temp,
                 timeout,
                 self.overwrite_var.get(),
@@ -606,7 +711,18 @@ class MillApp(ttk.Frame):
                             err = ""
                         except Exception:
                             pass
-                    elif any(k in low for k in ("timed out", "channel", "fetch failed", "cannot reach", "refused")):
+                    elif any(
+                        k in low
+                        for k in (
+                            "timed out",
+                            "channel",
+                            "fetch failed",
+                            "cannot reach",
+                            "refused",
+                            "429",
+                            "rate limit",
+                        )
+                    ):
                         self._log(f"{src.name}: {err.split(':')[0]}. Cool 45s then retry once")
                         self._pause(45)
                         if self.stop_event.is_set():
@@ -626,7 +742,7 @@ class MillApp(ttk.Frame):
                         self._log("Context overflow. Split this scene smaller.")
                     self._ui(lambda v=i: self.progress.configure(value=v))
                     if streak >= 3:
-                        self._log("Three LMS faults in a row. Stopping so the GPU can recover.")
+                        self._log("Three API faults in a row. Stopping.")
                         break
                     self._pause(max(pause, 20))
                     continue

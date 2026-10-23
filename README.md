@@ -6,20 +6,20 @@ It is a desktop app for Windows and Linux. The window title is Novel Mill. Scrip
 
 ## Requirements
 
-Mill needs a running model server. OCR needs Tesseract. Neither is bundled.
+Mill needs an OpenAI-compatible chat API. OCR needs Tesseract. Neither is bundled.
 
-- **LM Studio** (required to translate). Load a model with context **8192** and parallel slots **1**. Turn on the local server at `http://127.0.0.1:1234`. 4096 is too small once lock files are included.
+- **A chat model** (required to translate). Use **LM Studio** locally, or any host that speaks `/v1/chat/completions` (OpenAI, OpenRouter, xAI Grok, and others). For LM Studio: load a model with context **8192** and parallel slots **1**, server at `http://127.0.0.1:1234`. 4096 is too small once lock files are included. Cloud hosts need a real API key in the Mill Key field.
 - **Tesseract OCR** (required for scanned pages). Install `jpn` and `jpn_vert` traineddata. Text EPUBs do not need it.
 - **Python 3** on the PATH, if you run from source (`py -3` on Windows).
 - **Calibre**, only for store EPUBs. Convert EPUB to EPUB so Adobe DRM is gone before Extract.
 
 ## Install
 
-Grab the Windows exe or the Linux AppImage from the [releases](https://github.com/PatchScratch/novel-mill/releases) page. Tesseract and LM Studio are still separate installs; see Requirements.
+Grab the Windows exe or the Linux AppImage from the [releases](https://github.com/PatchScratch/novel-mill/releases) page. Tesseract (and LM Studio, if you run models locally) are still separate installs; see Requirements.
 
 To run from source instead, unzip, then double-click `wn-local-mill.bat` (Windows) or run `python3 wn-local-mill.py` (Linux). Python 3 must be on the PATH.
 
-Book folders are not part of the install. Theme, language, the scene tick list, and the Mill connection settings (API base, model, key, temp, pause, timeout, context) are saved under `%APPDATA%\NovelMill` (Windows) or `~/.config/novel_mill` (Linux).
+Book folders are not part of the install. Theme, language, the scene tick list, and the Mill connection settings (provider, API base, model, key, temp, pause, timeout, context) are saved under `%APPDATA%\NovelMill` (Windows) or `~/.config/novel_mill` (Linux).
 
 ## Tabs
 
@@ -56,18 +56,24 @@ Files on disk must be UTF-8. A garbled `raw_full.txt` is a bad export, not a ver
 
 ## Mill
 
-- API base `http://127.0.0.1:1234/v1`
-- Model id must match `/v1/models`
-- Context box must match the LM Studio load
-- Pause default 10 seconds
+Provider presets fill the API base (and a sample model id if Model is empty or still a preset sample):
+
+| Provider | API base |
+| --- | --- |
+| LM Studio | `http://127.0.0.1:1234/v1` |
+| OpenAI | `https://api.openai.com/v1` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
+| xAI Grok | `https://api.x.ai/v1` |
+| Custom | whatever you type |
+
+- Model id must match what the host lists on `/v1/models` (Ping API)
+- Context box must match the loaded model’s context window
+- Pause default 10 seconds (local GPU flush or cloud spacing)
 - Timeout default 1200 seconds
-- Three LM Studio faults in a row stop the queue
+- Three API faults in a row stop the queue; HTTP 429 gets one cool-down retry
+- Non-localhost bases reject the placeholder key `sk-xxx`
 
 A volume of about 30 chapters is often 3–5 hours on an RTX 3070 with a 12B Q4 model, if stubs and `_break` files are skipped.
-
-## Future features
-
-- Cloud models through the OpenAI chat-completions API: ChatGPT, Grok, OpenRouter, and any other host that speaks that format. This release talks only to LM Studio on `http://127.0.0.1:1234`.
 
 ## Not this project
 
